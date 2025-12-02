@@ -1,133 +1,151 @@
 import librosa
 import numpy as np
 import os
+import sys
+import contextlib
 from pathlib import Path
 from tqdm import tqdm
 import concurrent.futures
 
-def get_passt_spectrograms(
-    file_path, 
-    target_sr=32000, 
-    target_duration=10.0, 
-    n_mels=128
-):
+# ==========================================
+# KONFIGURATION
+# ==========================================
+INPUT_ROOT = Path("./audio_data")       
+OUTPUT_ROOT = Path("./mel_spectrograms") 
+TARGET_SR = 32000                       
+TARGET_DURATION = 10.0                  
+N_MELS = 128                            
+# ==========================================
+
+# --- HILFSFUNKTION: C-LEVEL WARNUNGEN UNTERDRÜCKEN ---
+@contextlib.contextmanager
+def ignore_stderr():
     """
-    Lädt MP3, teilt sie in 10s-Blöcke, wendet Repeat-Padding an 
-    und berechnet Log Mel Spektrogramme für JEDEN Block.
-    Gibt eine LISTE von Spektrogrammen zurück.
+    Leitet stderr temporär ins Leere um. 
+    Stoppt nervige 'Xing stream' und 'Header' Warnungen von C-Bibliotheken.
+    """
+    try:
+        # Öffne das "Nichts" (Null Device)
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        # Speichere den aktuellen stderr Kanal (Kanal 2)
+        old_stderr = os.dup(2)
+        sys.stderr.flush()
+        # Leite Kanal 2 auf devnull um
+        os.dup2(devnull, 2)
+        os.close(devnull)
+        yield
+    except Exception:
+        # Falls das System das Umleiten nicht erlaubt, mach einfach weiter
+        yield
+    finally:
+        # Stelle den alten stderr Kanal wieder her
+        try:
+            os.dup2(old_stderr, 2)
+            os.close(old_stderr)
+        except Exception:
+            pass
+
+def get_passt_spectrograms(file_path):
+    """
+    Lädt MP3 (leise), splittet in 10s Segmente, wendet Repeat-Padding an
+    und berechnet Mel-Spektrogramme.
     """
     try:
         # [cite_start]1. Laden & Resampling (32kHz Mono) [cite: 142]
-        y, sr = librosa.load(file_path, sr=target_sr, mono=True)
+        # Wir wickeln das Laden in unseren "Schalldämpfer"
+        with ignore_stderr():
+            y, sr = librosa.load(file_path, sr=TARGET_SR, mono=True)
     except Exception as e:
         return []
 
     if len(y) == 0:
         return []
 
-    # Ziel-Länge in Samples (32000 * 10 = 320.000)
-    target_samples = int(target_sr * target_duration)
-    
-    # Ergebnis-Liste
+    target_samples = int(TARGET_SR * TARGET_DURATION)
     spectrograms = []
 
-    # 2. Schleife: Audio in 10s Blöcke schneiden
-    # Wir gehen in Schritten von target_samples durch das Array
+    # 2. In 10s Blöcke schneiden
     for start_idx in range(0, len(y), target_samples):
-        # Den aktuellen Schnipsel ausschneiden
         end_idx = start_idx + target_samples
         chunk = y[start_idx:end_idx]
         
-        current_samples = len(chunk)
-        
-        # Sicherheitscheck für leere Chunks (sollte nicht passieren, aber sicher ist sicher)
-        if current_samples == 0:
+        if len(chunk) == 0:
             continue
 
-        # 3. Längen-Anpassung (Repeat Padding) für DIESEN Chunk
-        # Wenn der Chunk kürzer als 10s ist (z.B. der letzte Rest oder kurze Dateien)
-        if current_samples < target_samples:
-            n_repeats = int(np.ceil(target_samples / current_samples))
+        # 3. Repeat-Padding für den letzten/kurzen Chunk
+        if len(chunk) < target_samples:
+            n_repeats = int(np.ceil(target_samples / len(chunk)))
             y_padded = np.tile(chunk, n_repeats)
             chunk = y_padded[:target_samples]
         
-        # (Falls länger als target_samples: durch das Slicing oben [start:end] 
-        # ist er automatisch exakt lang genug, also kein 'elif' nötig)
+        # [cite_start]4. Mel-Spektrogramm berechnen (PaSST Specs) [cite: 143]
+        n_fft = int(0.025 * TARGET_SR)      # 25ms
+        hop_length = int(0.010 * TARGET_SR) # 10ms
 
-        # [cite_start]4. Mel Parameter [cite: 143]
-        n_fft = int(0.025 * target_sr)      # 800 samples
-        hop_length = int(0.010 * target_sr) # 320 samples
-
-        # 5. Spektrogramm Berechnung
         mel_spec = librosa.feature.melspectrogram(
             y=chunk, 
             sr=sr, 
             n_fft=n_fft, 
             hop_length=hop_length, 
-            n_mels=n_mels
+            n_mels=N_MELS
         )
 
-        # 6. Logarithmierung (dB)
+        # 5. Logarithmieren (dB)
         log_mel_spec = librosa.power_to_db(mel_spec, ref=np.max)
-        
         spectrograms.append(log_mel_spec)
     
     return spectrograms
 
-def process_file(file_info):
-    """Hilfsfunktion für die Parallelisierung"""
-    src_path, dst_base_path = file_info
+def process_file(job_info):
+    """Verarbeitet eine Datei und speichert das Ergebnis."""
+    src_path, rel_path = job_info
     
-    # Resume-Funktion: Wir prüfen, ob der erste Chunk (_0.npy) schon da ist.
-    # Wenn ja, gehen wir davon aus, dass die Datei schon verarbeitet wurde.
-    check_path = dst_base_path.with_name(f"{dst_base_path.stem}_0{dst_base_path.suffix}")
-    if check_path.exists():
+    # Ziel-Basis-Pfad
+    dst_base = OUTPUT_ROOT / rel_path.with_suffix('.npy')
+    
+    # Resume-Check
+    check_first = dst_base.with_name(f"{dst_base.stem}_0{dst_base.suffix}")
+    if check_first.exists():
         return "Skipped"
 
-    # Liste von Spektrogrammen holen
+    # Berechnung starten
     specs = get_passt_spectrograms(src_path)
     
     if specs:
-        # Zielordner erstellen
-        dst_base_path.parent.mkdir(parents=True, exist_ok=True)
+        # Ordner erstellen
+        dst_base.parent.mkdir(parents=True, exist_ok=True)
         
         # Alle Chunks speichern
         for i, spec in enumerate(specs):
-            # Neuer Dateiname: original_0.npy, original_1.npy, etc.
-            save_path = dst_base_path.with_name(f"{dst_base_path.stem}_{i}{dst_base_path.suffix}")
+            save_path = dst_base.with_name(f"{dst_base.stem}_{i}{dst_base.suffix}")
             np.save(save_path, spec)
             
         return "Success"
     else:
         return "Error"
 
-# --- HAUPTPROGRAMM ---
-
+# --- MAIN ---
 if __name__ == "__main__":
-    # Konfiguration
-    INPUT_ROOT = Path("./audio_data")
-    OUTPUT_ROOT = Path("./mel_spectrograms")
+    # CPU Kerne ermitteln
+    num_workers = os.cpu_count() or 1
     
-    # Automatische Erkennung der Kerne (für M1/M2/M3 Chips optimal)
-    NUM_WORKERS = os.cpu_count() 
-
-    print(f"Suche MP3-Dateien in {INPUT_ROOT}...")
-    all_mp3s = list(INPUT_ROOT.rglob("*.mp3"))
+    print(f"Suche MP3s in {INPUT_ROOT}...")
+    all_files = list(INPUT_ROOT.rglob("*.mp3"))
     
-    if not all_mp3s:
-        print("Keine MP3-Dateien gefunden!")
+    if not all_files:
+        print("Keine Dateien gefunden!")
         exit()
 
-    print(f"{len(all_mp3s)} Dateien gefunden. Starte Verarbeitung auf {NUM_WORKERS} Kernen...")
+    print(f"Gefunden: {len(all_files)} Dateien. Starte Verarbeitung auf {num_workers} Kernen...")
+    print("(MP3-Warnungen werden unterdrückt, damit der Balken sauber bleibt)")
 
+    # Job-Liste erstellen
     jobs = []
-    for mp3_path in all_mp3s:
-        rel_path = mp3_path.relative_to(INPUT_ROOT)
-        # Wir übergeben den Basis-Pfad. Die Indizes (_0, _1) werden in process_file angehängt.
-        npy_path = OUTPUT_ROOT / rel_path.with_suffix('.npy')
-        jobs.append((mp3_path, npy_path))
+    for f in all_files:
+        jobs.append((f, f.relative_to(INPUT_ROOT)))
 
-    with concurrent.futures.ProcessPoolExecutor(max_workers=NUM_WORKERS) as executor:
-        results = list(tqdm(executor.map(process_file, jobs), total=len(jobs), unit="file"))
+    # Parallel abarbeiten
+    with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
+        list(tqdm(executor.map(process_file, jobs), total=len(jobs), unit="file"))
 
-    print("\nFertig!")
+    print("\nFertig! Alle Spektrogramme liegen in:", OUTPUT_ROOT)
