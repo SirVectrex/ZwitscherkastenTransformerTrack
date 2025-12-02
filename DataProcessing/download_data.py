@@ -8,30 +8,28 @@ import os
 import sys
 
 # ==============================================================================
-# ⚙️ KONFIGURATION & SCHALTER
+# ⚙️ KONFIGURATION
 # ==============================================================================
 
 API_KEY = "93bfa6c3854af3b6f7429d1b36e5da0ac5491032"
 CSV_FILENAME = "Vogel_Vergleich_Liste_Birdset_vs_XenoCanto.csv"
 
-# --- MAXIMALE DATEIGRÖSSE ---
-# Nur Dateien herunterladen, die kleiner sind als X Megabyte.
-MAX_FILE_SIZE_MB = 1  
+# --- SMART FILTER (DAUER) ---
+# Ignoriere Aufnahmen, die länger sind als X Sekunden.
+# Das verhindert, dass wir riesige 5-Minuten-Dateien laden.
+MAX_DURATION_SECONDS = 60 
 
-# --- AUSWAHL VOGELARTEN (RANGE) ---
-START_INDEX = 0      # Start bei Vogel Nr. X
-END_INDEX   = 20     # Ende bei Vogel Nr. Y 
-
-# --- DOWNLOAD MODUS ---
+# --- RANGE & MODUS ---
+START_INDEX = 0      
+END_INDEX   = 20     
 DOWNLOAD_MODE = "UNLIMITED" 
-LIMIT_PER_CATEGORY = 30  
+LIMIT_PER_CATEGORY = 30 
 
-# Tuning
+# --- TUNING ---
 SEARCH_WORKERS = 4     
-DOWNLOAD_WORKERS = 8  # Konservativer Wert für M5/Apple Silicon
+DOWNLOAD_WORKERS = 8  
 
 # ==============================================================================
-
 
 def load_species_from_csv(csv_path, start=0, end=None):
     try:
@@ -40,242 +38,183 @@ def load_species_from_csv(csv_path, start=0, end=None):
             raise ValueError("Spalte 'Wissenschaftlicher Name' nicht gefunden!")
         
         if start < 0: start = 0
-        if end is None:
-            slice_df = df.iloc[start:]
-        else:
-            slice_df = df.iloc[start:end]
+        if end is None: slice_df = df.iloc[start:]
+        else: slice_df = df.iloc[start:end]
             
         species_list = slice_df['Wissenschaftlicher Name'].tolist()
-        species_list = [name.strip() for name in species_list if isinstance(name, str) and name.strip()]
-        
-        print(f"Info: Lade Zeilen {start} bis {end if end else 'Ende'} (Total: {len(species_list)} Arten)")
-        return species_list
+        return [name.strip() for name in species_list if isinstance(name, str) and name.strip()]
     except Exception as e:
-        print(f"Fehler beim Lesen der CSV: {e}")
+        print(f"CSV Fehler: {e}")
         return []
 
+def parse_duration(duration_str):
+    """Hilfsfunktion: Wandelt 'min:sec' in Sekunden um"""
+    try:
+        if ':' in str(duration_str):
+            parts = str(duration_str).split(':')
+            return int(parts[0]) * 60 + float(parts[1])
+        return float(duration_str)
+    except:
+        return 0.0 # Im Zweifel laden
 
-def search_limited(species_name, target_count):
-    parts = species_name.split()
-    query = f'gen:{parts[0]} sp:{parts[1]}' if len(parts) == 2 else f'gen:{parts[0]}'
-    base_url = "https://xeno-canto.org/api/3/recordings"
-    
-    print(f"[{species_name}] Suche (Ziel: je {target_count} A/B/C)...", flush=True)
-    
-    collected = {'A': [], 'B': [], 'C': []}
-    page = 1
-    
-    while page <= 50:
-        params = {"query": query, "key": API_KEY, "page": page}
-        try:
-            response = requests.get(base_url, params=params, timeout=10)
-            if response.status_code != 200: break
-            
-            data = response.json()
-            recordings = data.get('recordings', [])
-            if not recordings: break
-            
-            for rec in recordings:
-                q = rec.get('q', 'E')
-                if q in ['A', 'B', 'C'] and len(collected[q]) < target_count:
-                    collected[q].append(clean_rec_data(rec))
-            
-            if all(len(collected[q]) >= target_count for q in ['A', 'B', 'C']):
-                break
-            page += 1
-            time.sleep(0.2)
-        except Exception:
-            break
-            
-    results = collected['A'] + collected['B'] + collected['C']
-    return species_name, results
-
+def clean_rec_data(rec):
+    return {
+        'id': rec['id'], 
+        'quality': rec.get('q'), 
+        'length': rec.get('length'),
+        'file_url': rec['file']
+    }
 
 def search_unlimited(species_name):
     parts = species_name.split()
     query = f'gen:{parts[0]} sp:{parts[1]}' if len(parts) == 2 else f'gen:{parts[0]}'
     base_url = "https://xeno-canto.org/api/3/recordings"
-    
-    print(f"[{species_name}] Suche ALLES...", flush=True)
+    print(f"[{species_name}] Suche...", flush=True)
     collected = []
     page = 1
     
     while True:
-        params = {"query": query, "key": API_KEY, "page": page}
         try:
-            response = requests.get(base_url, params=params, timeout=15)
-            if response.status_code != 200: break
+            r = requests.get(base_url, params={"query": query, "key": API_KEY, "page": page}, timeout=15)
+            if r.status_code != 200: break
+            data = r.json()
+            if not data.get('recordings'): break
             
-            data = response.json()
-            num_pages = int(data.get('numPages', 1))
+            for rec in data['recordings']:
+                # 1. Qualitäts-Check
+                if rec.get('q') not in ['A', 'B', 'C']:
+                    continue
+                
+                # 2. Dauer-Check (Metadaten)
+                # Wir sortieren hier schon aus, bevor wir überhaupt ans Herunterladen denken
+                dur = parse_duration(rec.get('length', '0'))
+                if dur > MAX_DURATION_SECONDS:
+                    continue
+
+                collected.append(clean_rec_data(rec))
             
-            recordings = data.get('recordings', [])
-            if not recordings: break
-            
-            for rec in recordings:
-                if rec.get('q') in ['A', 'B', 'C']:
-                    collected.append(clean_rec_data(rec))
-            
-            if page >= num_pages: break
+            if page >= int(data.get('numPages', 1)): break
             page += 1
-            time.sleep(0.25)
-        except Exception:
-            break
-            
+            time.sleep(0.2)
+        except: break
     return species_name, collected
 
+def search_limited(species_name, limit):
+    parts = species_name.split()
+    query = f'gen:{parts[0]} sp:{parts[1]}' if len(parts) == 2 else f'gen:{parts[0]}'
+    base_url = "https://xeno-canto.org/api/3/recordings"
+    print(f"[{species_name}] Suche (Limit {limit})...", flush=True)
+    collected = {'A': [], 'B': [], 'C': []}
+    page = 1
+    
+    while page <= 50:
+        try:
+            r = requests.get(base_url, params={"query": query, "key": API_KEY, "page": page}, timeout=10)
+            if r.status_code != 200: break
+            data = r.json()
+            if not data.get('recordings'): break
+            
+            for rec in data['recordings']:
+                q = rec.get('q', 'E')
+                if q not in ['A','B','C']: continue
+                
+                # Dauer-Check
+                dur = parse_duration(rec.get('length', '0'))
+                if dur > MAX_DURATION_SECONDS: continue
 
-def clean_rec_data(rec):
-    return {
-        'id': rec['id'], 'quality': rec.get('q'), 'length': rec['length'],
-        'file_url': rec['file'], 'country': rec['cnt'],
-        'location': rec['loc'], 'date': rec['date']
-    }
-
+                if len(collected[q]) < limit:
+                    collected[q].append(clean_rec_data(rec))
+            
+            if all(len(collected[k]) >= limit for k in ['A','B','C']): break
+            page += 1
+            time.sleep(0.2)
+        except: break
+    return species_name, collected['A'] + collected['B'] + collected['C']
 
 def save_metadata_wrapper(species_name, recordings):
     if not recordings: return
-    output_dir = "metadata"
-    Path(output_dir).mkdir(exist_ok=True)
-    filename = f"{species_name.replace(' ', '_')}_metadata.json"
-    filepath = Path(output_dir) / filename
-    with open(filepath, 'w', encoding='utf-8') as f:
-        json.dump(recordings, f, indent=2, ensure_ascii=False)
-
+    Path("metadata").mkdir(exist_ok=True)
+    fname = Path("metadata") / f"{species_name.replace(' ', '_')}_metadata.json"
+    with open(fname, 'w', encoding='utf-8') as f:
+        json.dump(recordings, f, indent=2)
 
 def download_single_file(rec, species_dir):
     """
-    Lädt Datei nur herunter, wenn sie < MAX_FILE_SIZE_MB ist.
+    Standard Download (kein Größen-Check mehr, da wir auf Metadaten vertrauen)
     """
-    max_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
-    
     try:
-        # stream=True lädt nur die Header, nicht den Inhalt!
-        with requests.get(rec['file_url'], stream=True, timeout=60) as response:
-            if response.status_code == 200:
-                
-                # 1. Größe prüfen (Content-Length Header)
-                total_length = response.headers.get('content-length')
-                
-                if total_length is not None:
-                    if int(total_length) > max_bytes:
-                        # Zu groß -> Ignorieren (gibt False zurück, aber keinen Fehler)
-                        return False, 0
-                
-                # 2. Wenn Größe passt (oder unbekannt ist), laden wir den Inhalt
-                filename = f"{rec['id']}_q{rec['quality']}.mp3"
-                filepath = species_dir / filename
-                
-                downloaded_size = 0
-                with open(filepath, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                            downloaded_size += len(chunk)
-                            
-                            # Notbremse: Falls kein Header da war, aber Datei riesig wird
-                            if downloaded_size > max_bytes:
-                                f.close()
-                                filepath.unlink() # Teilweise Datei löschen
-                                return False, 0
-
-                return True, downloaded_size
-                
-        return False, 0
-    except Exception:
-        return False, 0
-
+        # Timeout hoch setzen für Stabilität
+        r = requests.get(rec['file_url'], timeout=60)
+        
+        if r.status_code == 200:
+            filename = f"{rec['id']}_q{rec['quality']}.mp3"
+            filepath = species_dir / filename
+            
+            with open(filepath, 'wb') as f:
+                f.write(r.content)
+            return True
+            
+        return False
+    except:
+        return False
 
 # ==============================================================================
 # HAUPTPROGRAMM
 # ==============================================================================
 if __name__ == "__main__":
     try:
-        print("=" * 70)
-        print(f"XENO-CANTO DOWNLOADER (Smart Filter)")
-        print(f"Limit: Nur Dateien < {MAX_FILE_SIZE_MB} MB")
-        print(f"Modus: {DOWNLOAD_MODE} | Worker: {DOWNLOAD_WORKERS}")
-        print("=" * 70)
+        print("=" * 60)
+        print(f"XENO-CANTO DOWNLOADER (Duration Filter Only)")
+        print(f"Filter: Nur Aufnahmen <= {MAX_DURATION_SECONDS} Sekunden")
+        print("=" * 60)
 
-        SPECIES_LIST = load_species_from_csv(CSV_FILENAME, start=START_INDEX, end=END_INDEX)
-        
-        if not SPECIES_LIST: 
-            print("Keine Vogelarten im gewählten Bereich gefunden.")
-            sys.exit(0)
+        SPECIES = load_species_from_csv(CSV_FILENAME, START_INDEX, END_INDEX)
+        if not SPECIES: sys.exit(0)
 
-        # --- PHASE 1: SUCHE ---
-        print("\n--- PHASE 1: Metadaten sammeln ---")
-        with ThreadPoolExecutor(max_workers=SEARCH_WORKERS) as executor:
-            future_to_species = {}
-            for species in SPECIES_LIST:
-                if DOWNLOAD_MODE == "UNLIMITED":
-                    future = executor.submit(search_unlimited, species)
-                else:
-                    future = executor.submit(search_limited, species, LIMIT_PER_CATEGORY)
-                future_to_species[future] = species
+        # PHASE 1: Metadaten
+        print("\n--- Metadaten sammeln ---")
+        with ThreadPoolExecutor(max_workers=SEARCH_WORKERS) as exc:
+            futs = {}
+            for s in SPECIES:
+                if DOWNLOAD_MODE == "UNLIMITED": fut = exc.submit(search_unlimited, s)
+                else: fut = exc.submit(search_limited, s, LIMIT_PER_CATEGORY)
+                futs[fut] = s
+            for f in as_completed(futs):
+                try: n, r = f.result(); save_metadata_wrapper(n, r)
+                except: pass
+
+        # PHASE 2: Downloads
+        print("\n--- Downloads ---")
+        jobs = []
+        for meta in Path("metadata").glob("*.json"):
+            name = meta.stem.replace('_metadata', '').replace('_', ' ')
+            if name not in SPECIES: continue
             
-            for future in as_completed(future_to_species):
-                try:
-                    name, recs = future.result()
-                    save_metadata_wrapper(name, recs)
-                except Exception: pass
-
-        # --- PHASE 2: DOWNLOAD ---
-        print("\n--- PHASE 2: Downloads (Smart Filter aktiv) ---")
-        
-        all_jobs = []
-        metadata_files = list(Path("metadata").glob("*.json"))
-        
-        for meta_file in metadata_files:
-            species_name = meta_file.stem.replace('_metadata', '')
-            if species_name.replace('_', ' ') not in SPECIES_LIST:
-                continue 
-
-            dest_dir = Path("audio_data") / species_name
-            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest = Path("audio_data") / meta.stem.replace('_metadata', '')
+            dest.mkdir(parents=True, exist_ok=True)
             
-            with open(meta_file, 'r', encoding='utf-8') as f:
-                recs = json.load(f)
-                for r in recs:
-                    fname = f"{r['id']}_q{r['quality']}.mp3"
-                    if not (dest_dir / fname).exists():
-                        all_jobs.append((r, dest_dir))
+            with open(meta) as f:
+                for r in json.load(f):
+                    if not (dest / f"{r['id']}_q{r['quality']}.mp3").exists():
+                        jobs.append((r, dest))
         
-        total_candidates = len(all_jobs)
-        if total_candidates == 0:
-            print("Nichts zu tun.")
-            sys.exit(0)
-
-        print(f"Prüfe {total_candidates} Kandidaten auf Größe...")
+        total = len(jobs)
+        if total == 0: print("Alles erledigt."); sys.exit(0)
         
-        completed = 0
-        skipped_size = 0
-        total_bytes = 0
-        start_time_dl = time.time()
+        print(f"Lade {total} gefilterte Dateien...")
+        done = 0
         
-        with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as executor:
-            futures = [executor.submit(download_single_file, job[0], job[1]) for job in all_jobs]
-            
-            for i, future in enumerate(as_completed(futures)):
-                success, size_bytes = future.result()
+        with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as exc:
+            futures = [exc.submit(download_single_file, j[0], j[1]) for j in jobs]
+            for i, f in enumerate(as_completed(futures)):
+                if f.result(): done += 1
                 
-                if success:
-                    completed += 1
-                    total_bytes += size_bytes
-                else:
-                    skipped_size += 1
-                
-                if i % 5 == 0 or i == total_candidates - 1:
-                    elapsed = time.time() - start_time_dl
-                    speed_mb_s = (total_bytes / 1024**2) / elapsed if elapsed > 0 else 0
-                    percent = (i + 1) / total_candidates * 100
-                    
-                    print(f"Fortschritt: {i+1}/{total_candidates} ({percent:.1f}%) | "
-                          f"Geladen: {completed} | Zu Groß/Fehler: {skipped_size} | "
-                          f"Speed: {speed_mb_s:.2f} MB/s   ", end='\r')
+                if i % 10 == 0 or i == total - 1:
+                    pct = (i+1)/total * 100
+                    print(f"Status: {done}/{total} geladen ({pct:.1f}%)   ", end='\r')
 
-        print(f"\n\nFERTIG! {completed} Dateien geladen. ({skipped_size} übersprungen)")
+        print(f"\n\nFertig! {done} neue Dateien geladen.")
 
     except KeyboardInterrupt:
-        print("\n\nABBRUCH DURCH BENUTZER.")
+        print("\nAbbruch durch Benutzer.")
         os._exit(1)
