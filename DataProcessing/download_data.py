@@ -15,13 +15,12 @@ API_KEY = "93bfa6c3854af3b6f7429d1b36e5da0ac5491032"
 CSV_FILENAME = "Vogel_Vergleich_Liste_Birdset_vs_XenoCanto.csv"
 
 # --- SMART FILTER (DAUER) ---
-# Ignoriere Aufnahmen, die länger sind als X Sekunden.
-# Das verhindert, dass wir riesige 5-Minuten-Dateien laden.
+# Ignoriere Aufnahmen > 45 Sekunden (spart Zeit & Speicher)
 MAX_DURATION_SECONDS = 60 
 
 # --- RANGE & MODUS ---
 START_INDEX = 0      
-END_INDEX   = 20     
+END_INDEX   = 32     
 DOWNLOAD_MODE = "UNLIMITED" 
 LIMIT_PER_CATEGORY = 30 
 
@@ -48,14 +47,13 @@ def load_species_from_csv(csv_path, start=0, end=None):
         return []
 
 def parse_duration(duration_str):
-    """Hilfsfunktion: Wandelt 'min:sec' in Sekunden um"""
     try:
         if ':' in str(duration_str):
             parts = str(duration_str).split(':')
             return int(parts[0]) * 60 + float(parts[1])
         return float(duration_str)
     except:
-        return 0.0 # Im Zweifel laden
+        return 0.0
 
 def clean_rec_data(rec):
     return {
@@ -81,14 +79,10 @@ def search_unlimited(species_name):
             if not data.get('recordings'): break
             
             for rec in data['recordings']:
-                # 1. Qualitäts-Check
-                if rec.get('q') not in ['A', 'B', 'C']:
-                    continue
+                if rec.get('q') not in ['A', 'B', 'C']: continue
                 
-                # 2. Dauer-Check (Metadaten)
-                # Wir sortieren hier schon aus, bevor wir überhaupt ans Herunterladen denken
-                dur = parse_duration(rec.get('length', '0'))
-                if dur > MAX_DURATION_SECONDS:
+                # Metadaten-Filter
+                if parse_duration(rec.get('length', '0')) > MAX_DURATION_SECONDS:
                     continue
 
                 collected.append(clean_rec_data(rec))
@@ -117,10 +111,7 @@ def search_limited(species_name, limit):
             for rec in data['recordings']:
                 q = rec.get('q', 'E')
                 if q not in ['A','B','C']: continue
-                
-                # Dauer-Check
-                dur = parse_duration(rec.get('length', '0'))
-                if dur > MAX_DURATION_SECONDS: continue
+                if parse_duration(rec.get('length', '0')) > MAX_DURATION_SECONDS: continue
 
                 if len(collected[q]) < limit:
                     collected[q].append(clean_rec_data(rec))
@@ -140,23 +131,26 @@ def save_metadata_wrapper(species_name, recordings):
 
 def download_single_file(rec, species_dir):
     """
-    Standard Download (kein Größen-Check mehr, da wir auf Metadaten vertrauen)
+    Lädt Datei und gibt (Erfolg, Größe_in_Bytes) zurück.
     """
     try:
-        # Timeout hoch setzen für Stabilität
-        r = requests.get(rec['file_url'], timeout=60)
-        
-        if r.status_code == 200:
-            filename = f"{rec['id']}_q{rec['quality']}.mp3"
-            filepath = species_dir / filename
-            
-            with open(filepath, 'wb') as f:
-                f.write(r.content)
-            return True
-            
-        return False
+        # Stream nutzen, um Größe sauber zu messen
+        with requests.get(rec['file_url'], stream=True, timeout=60) as r:
+            if r.status_code == 200:
+                filename = f"{rec['id']}_q{rec['quality']}.mp3"
+                filepath = species_dir / filename
+                
+                downloaded = 0
+                with open(filepath, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                
+                return True, downloaded
+            return False, 0
     except:
-        return False
+        return False, 0
 
 # ==============================================================================
 # HAUPTPROGRAMM
@@ -164,14 +158,15 @@ def download_single_file(rec, species_dir):
 if __name__ == "__main__":
     try:
         print("=" * 60)
-        print(f"XENO-CANTO DOWNLOADER (Duration Filter Only)")
-        print(f"Filter: Nur Aufnahmen <= {MAX_DURATION_SECONDS} Sekunden")
+        print(f"XENO-CANTO DOWNLOADER (Speed Display)")
+        print(f"Filter: <= {MAX_DURATION_SECONDS}s | Modus: {DOWNLOAD_MODE}")
         print("=" * 60)
 
         SPECIES = load_species_from_csv(CSV_FILENAME, START_INDEX, END_INDEX)
         if not SPECIES: sys.exit(0)
 
         # PHASE 1: Metadaten
+        
         print("\n--- Metadaten sammeln ---")
         with ThreadPoolExecutor(max_workers=SEARCH_WORKERS) as exc:
             futs = {}
@@ -182,6 +177,7 @@ if __name__ == "__main__":
             for f in as_completed(futs):
                 try: n, r = f.result(); save_metadata_wrapper(n, r)
                 except: pass
+        
 
         # PHASE 2: Downloads
         print("\n--- Downloads ---")
@@ -202,18 +198,39 @@ if __name__ == "__main__":
         if total == 0: print("Alles erledigt."); sys.exit(0)
         
         print(f"Lade {total} gefilterte Dateien...")
+        
+        # Variablen für Speed-Anzeige
         done = 0
+        total_bytes = 0
+        start_time_dl = time.time()
         
         with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as exc:
             futures = [exc.submit(download_single_file, j[0], j[1]) for j in jobs]
+            
             for i, f in enumerate(as_completed(futures)):
-                if f.result(): done += 1
+                success, size = f.result()
                 
-                if i % 10 == 0 or i == total - 1:
+                if success:
+                    done += 1
+                    total_bytes += size
+                
+                # Anzeige aktualisieren (alle 5 Dateien oder am Ende)
+                if i % 5 == 0 or i == total - 1:
                     pct = (i+1)/total * 100
-                    print(f"Status: {done}/{total} geladen ({pct:.1f}%)   ", end='\r')
+                    
+                    # Speed berechnen
+                    elapsed = time.time() - start_time_dl
+                    if elapsed > 0:
+                        mb = total_bytes / (1024 * 1024)
+                        speed = mb / elapsed
+                    else:
+                        speed = 0.0
+                    
+                    print(f"Status: {done}/{total} ({pct:.1f}%) | "
+                          f"Gesamt: {mb:.1f} MB | "
+                          f"Speed: {speed:.2f} MB/s   ", end='\r')
 
-        print(f"\n\nFertig! {done} neue Dateien geladen.")
+        print(f"\n\nFertig! {done} Dateien geladen.")
 
     except KeyboardInterrupt:
         print("\nAbbruch durch Benutzer.")
