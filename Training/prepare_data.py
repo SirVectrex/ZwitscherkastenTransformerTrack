@@ -54,7 +54,7 @@ def main():
     # it appears in both train and val sets proportionally.
     train_df, val_df = train_test_split(
         df, 
-        test_size=0.2,      # 20% for validation
+        test_size=0.1,      # 20% for validation
         stratify=df['label'], 
         random_state=42,
         shuffle=True

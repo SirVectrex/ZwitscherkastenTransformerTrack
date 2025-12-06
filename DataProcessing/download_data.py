@@ -15,12 +15,14 @@ API_KEY = "93bfa6c3854af3b6f7429d1b36e5da0ac5491032"
 CSV_FILENAME = "Vogel_Vergleich_Liste_Birdset_vs_XenoCanto.csv"
 
 # --- SMART FILTER (DAUER) ---
-# Ignoriere Aufnahmen > 45 Sekunden (spart Zeit & Speicher)
+# Ignoriere Aufnahmen > 60 Sekunden (spart Zeit & Speicher)
 MAX_DURATION_SECONDS = 60 
 
 # --- RANGE & MODUS ---
-START_INDEX = 22      
-END_INDEX   = 32     
+
+# Adjust Range to as including top and lower boundary (for first 64 species use START=0, END=64)
+START_INDEX = 0      
+END_INDEX   = 64     
 DOWNLOAD_MODE = "UNLIMITED" 
 LIMIT_PER_CATEGORY = 30 
 

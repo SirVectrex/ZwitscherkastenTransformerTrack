@@ -10,9 +10,9 @@ import os
 from dataset import MelDataset
 
 # --- CONFIGURATION ---
-CSV_TRAIN = "train.csv"  # columns: filepath, label
-CSV_VAL = "val.csv"
-NUM_CLASSES = 50         # Change this to your number of bird species
+CSV_TRAIN = "./Training/train.csv"  # columns: filepath, label
+CSV_VAL = "./Training/val.csv"
+NUM_CLASSES = 60         # Change this to your number of bird species
 BATCH_SIZE = 16          # PaSST is heavy; reduce this if you get CUDA OOM
 LEARNING_RATE = 1e-5     # Low LR is best for finetuning
 EPOCHS = 20
@@ -20,23 +20,31 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 SAVE_DIR = "./checkpoints"
 
 def get_passt_model(num_classes):
-    # 1. Load Pretrained PaSST
-    # mode="all" enables Patchout (randomly drops patches to speed up training)
-    # arch="passt_s_swa_p16_128_ap476" is the high-performance AudioSet checkpoint
     print("Loading PaSST model...")
     model = get_basic_model(mode="all", arch="passt_s_swa_p16_128_ap476")
 
-    # 2. CRITICAL: Bypass the Audio Frontend
-    # The original model expects raw audio and converts it to Mel.
-    # We replace that conversion layer with Identity since we feed Mels directly.
+    # 1. Bypass the Audio Frontend
     model.mel = nn.Identity()
 
-    # 3. Replace the Classification Head
-    # PaSST's classifier is stored in model.net.head
-    in_features = model.net.head.in_features
-    model.net.head = nn.Linear(in_features, num_classes)
+    # 2. Replace the Classification Head
+    # Check if the head is a Sequential block (LayerNorm + Linear)
+    if isinstance(model.net.head, nn.Sequential):
+        # The Linear layer is the last item in the list [-1]
+        in_features = model.net.head[-1].in_features
+        
+        # Replace ONLY the final Linear layer (keeping the LayerNorm before it)
+        model.net.head[-1] = nn.Linear(in_features, num_classes)
+    else:
+        # Fallback: It is just a single Linear layer
+        in_features = model.net.head.in_features
+        model.net.head = nn.Linear(in_features, num_classes)
+    
+    # Optional: Initialize weights for the new layer
+    # torch.nn.init.xavier_uniform_(model.net.head[-1].weight)
     
     return model
+
+# --- train.py - Corrected train_one_epoch function ---
 
 def train_one_epoch(model, loader, criterion, optimizer):
     model.train()
@@ -47,12 +55,17 @@ def train_one_epoch(model, loader, criterion, optimizer):
     loop = tqdm(loader, desc="Training")
     for mels, labels in loop:
         mels, labels = mels.to(DEVICE), labels.to(DEVICE)
+      
+        print("Shape of mels:", mels.shape)
+        # The data is already in [Batch, 1, 128, 998]
 
         optimizer.zero_grad()
         
         # Forward pass
-        # Input shape: [Batch, 1, 128, 998]
-        logits = model(mels) 
+        mels = mels.view(mels.size(0), 128, 998)
+        
+        # Forward pass
+        logits = model(mels)
         
         loss = criterion(logits, labels)
         loss.backward()
@@ -69,6 +82,7 @@ def train_one_epoch(model, loader, criterion, optimizer):
 
     return running_loss / len(loader), correct / total
 
+
 def validate(model, loader, criterion):
     model.eval()
     running_loss = 0.0
@@ -78,6 +92,8 @@ def validate(model, loader, criterion):
     with torch.no_grad():
         for mels, labels in loader:
             mels, labels = mels.to(DEVICE), labels.to(DEVICE)
+
+            mels = mels.view(mels.size(0), 128, 998)
             
             # Note: PaSST usually disables Patchout during eval automatically
             logits = model(mels)
@@ -89,6 +105,32 @@ def validate(model, loader, criterion):
             correct += (predicted == labels).sum().item()
             
     return running_loss / len(loader), correct / total
+
+def set_patchout_difficulty(model, difficulty="standard"):
+    """
+    Adjusts the structured Patchout (dropping time/freq strips).
+    
+    Standard PaSST (10s clips):
+    - s_patchout_t: Drops time columns (vertical strips)
+    - s_patchout_f: Drops freq rows (horizontal strips)
+    """
+    if difficulty == "hard":
+        # Drop MORE information (Good if you have lots of data/overfitting)
+        model.net.s_patchout_t = 40  # Default is usually around 20-30
+        model.net.s_patchout_f = 6   # Default is usually 4
+        print("Patchout set to HARD (High regularization)")
+        
+    elif difficulty == "light":
+        # Drop LESS (Good for small datasets or very short/sparse bird calls)
+        model.net.s_patchout_t = 10
+        model.net.s_patchout_f = 2
+        print("Patchout set to LIGHT (Low regularization)")
+        
+    else:
+        # Restore defaults (approximate values for PaSST-S)
+        model.net.s_patchout_t = 20
+        model.net.s_patchout_f = 4
+        print("Patchout set to STANDARD")
 
 def main():
     os.makedirs(SAVE_DIR, exist_ok=True)
@@ -104,6 +146,9 @@ def main():
     # 2. Model Setup
     model = get_passt_model(NUM_CLASSES)
     model = model.to(DEVICE)
+
+    #2.5 Optional: Adjust Patchout Difficulty
+    set_patchout_difficulty(model, difficulty="standard")
 
     # 3. Optimizer & Loss
     # AdamW is standard for Transformers
