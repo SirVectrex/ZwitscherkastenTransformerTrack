@@ -8,3 +8,4 @@ scikit-learn>=1.1
 tqdm>=4.64
 pyyaml>=6.0
 hear21passt
+pandas
