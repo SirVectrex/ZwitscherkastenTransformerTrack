@@ -19,7 +19,7 @@ CSV_FILENAME = "Vogel_Vergleich_Liste_Birdset_vs_XenoCanto.csv"
 MAX_DURATION_SECONDS = 60 
 
 # --- RANGE & MODUS ---
-START_INDEX = 0      
+START_INDEX = 22      
 END_INDEX   = 32     
 DOWNLOAD_MODE = "UNLIMITED" 
 LIMIT_PER_CATEGORY = 30 
