@@ -1,4 +1,6 @@
+echo "checkpoints/" >> .gitignore
 DataProcessing/*/
+Checkpoints/
 
 # Virtuelle Umgebung (NIEMALS hochladen)
 .venv/

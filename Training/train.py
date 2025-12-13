@@ -5,6 +5,12 @@ from torch.utils.data import DataLoader
 from hear21passt.base import get_basic_model
 from tqdm import tqdm
 import os
+import time
+import csv
+import json
+from pathlib import Path
+from torch.utils.tensorboard import SummaryWriter
+
 
 # --- IMPORTS FROM YOUR FILES ---
 from dataset import MelDataset
@@ -18,6 +24,11 @@ LEARNING_RATE = 1e-5     # Low LR is best for finetuning
 EPOCHS = 20
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 SAVE_DIR = "./checkpoints"
+
+LOG_DIR = "./logs"
+RUN_NAME = "passt_finetune"   # you can append timestamp if you want
+SAVE_EVERY_EPOCH = True       # set False if disk is an issue
+EARLY_STOP_PATIENCE = 5       # epochs without improvement before stopping
 
 def get_passt_model(num_classes):
     print("Loading PaSST model...")
@@ -46,41 +57,60 @@ def get_passt_model(num_classes):
 
 # --- train.py - Corrected train_one_epoch function ---
 
-def train_one_epoch(model, loader, criterion, optimizer):
+def get_lr(optimizer):
+    return optimizer.param_groups[0]["lr"]
+
+def save_checkpoint(path, model, optimizer, epoch, best_acc, extra=None):
+    ckpt = {
+        "epoch": epoch,
+        "model_state": model.state_dict(),
+        "optimizer_state": optimizer.state_dict(),
+        "best_acc": best_acc,
+    }
+    if extra:
+        ckpt.update(extra)
+    torch.save(ckpt, path)
+
+
+def train_one_epoch(model, loader, criterion, optimizer, writer=None, global_step_start=0):
     model.train()
     running_loss = 0.0
     correct = 0
     total = 0
+    global_step = global_step_start
 
     loop = tqdm(loader, desc="Training")
     for mels, labels in loop:
         mels, labels = mels.to(DEVICE), labels.to(DEVICE)
-      
-        print("Shape of mels:", mels.shape)
-        # The data is already in [Batch, 1, 128, 998]
 
         optimizer.zero_grad()
-        
-        # Forward pass
-        mels = mels.view(mels.size(0), 128, 998)
-        
-        # Forward pass
+
+        # Expecting [B, 1, 128, 998] or [B, 128, 998]
+        if mels.dim() == 4:
+            mels = mels.squeeze(1)  # [B, 128, 998]
+        elif mels.dim() != 3:
+            raise ValueError(f"Unexpected mel shape: {mels.shape}")
+
         logits = model(mels)
-        
         loss = criterion(logits, labels)
         loss.backward()
         optimizer.step()
 
         running_loss += loss.item()
-        
-        # Accuracy tracking
+
         _, predicted = torch.max(logits, 1)
         total += labels.size(0)
         correct += (predicted == labels).sum().item()
-        
+
+        if writer is not None:
+            writer.add_scalar("train/batch_loss", loss.item(), global_step)
+        global_step += 1
+
         loop.set_postfix(loss=loss.item())
 
-    return running_loss / len(loader), correct / total
+    avg_loss = running_loss / len(loader)
+    acc = correct / total
+    return avg_loss, acc, global_step
 
 
 def validate(model, loader, criterion):
