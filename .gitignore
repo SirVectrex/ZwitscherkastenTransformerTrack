@@ -1,3 +1,5 @@
+DataProcessing/*/
+
 # Virtuelle Umgebung (NIEMALS hochladen)
 .venv/
 venv/
@@ -229,3 +231,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Datasuff
+

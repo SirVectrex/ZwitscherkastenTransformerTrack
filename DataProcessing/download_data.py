@@ -27,8 +27,8 @@ DOWNLOAD_MODE = "UNLIMITED"
 LIMIT_PER_CATEGORY = 30 
 
 # --- TUNING ---
-SEARCH_WORKERS = 4     
-DOWNLOAD_WORKERS = 8  
+SEARCH_WORKERS = 16     
+DOWNLOAD_WORKERS = 16  
 
 # ==============================================================================
 
@@ -168,7 +168,7 @@ if __name__ == "__main__":
         if not SPECIES: sys.exit(0)
 
         # PHASE 1: Metadaten
-        """
+        
         print("\n--- Metadaten sammeln ---")
         with ThreadPoolExecutor(max_workers=SEARCH_WORKERS) as exc:
             futs = {}
@@ -179,7 +179,7 @@ if __name__ == "__main__":
             for f in as_completed(futs):
                 try: n, r = f.result(); save_metadata_wrapper(n, r)
                 except: pass
-        """
+        
 
         # PHASE 2: Downloads
         print("\n--- Downloads ---")
