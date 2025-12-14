@@ -19,7 +19,7 @@ from dataset import MelDataset
 # --- CONFIGURATION ---
 CSV_TRAIN = "./Training/train.csv"  # columns: filepath, label
 CSV_VAL = "./Training/val.csv"
-NUM_CLASSES = 60         # Change this to your number of bird species
+NUM_CLASSES = 58         # Change this to your number of bird species
 BATCH_SIZE = 16          # PaSST is heavy; reduce this if you get CUDA OOM
 LEARNING_RATE = 1e-5     # Low LR is best for finetuning
 EPOCHS = 20
