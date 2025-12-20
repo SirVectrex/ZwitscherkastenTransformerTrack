@@ -6,7 +6,7 @@ from sklearn.model_selection import train_test_split
 
 # --- CONFIGURATION ---
 # Point this to your folder containing the bird subfolders
-DATA_ROOT = "./DataProcessing/mel_spectrograms_uint8" 
+DATA_ROOT = "/dev/shm/schoen/data/subset_2" 
 OUTPUT_DIR = "./Training/" 
 
 def main():

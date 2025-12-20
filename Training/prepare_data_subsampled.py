@@ -5,7 +5,7 @@ from pathlib import Path
 from sklearn.model_selection import train_test_split
 
 # --- CONFIGURATION ---
-DATA_ROOT = "./DataProcessing/split_dataset_1000min"    # <-- new structure with subset folders
+DATA_ROOT = "/dev/shm/schoen/data"    # <-- new structure with subset folders
 OUTPUT_DIR = "./Training/"
 # ---------------------
 

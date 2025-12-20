@@ -19,14 +19,14 @@ from dataset import MelDataset
 # --- CONFIGURATION ---
 CSV_TRAIN = "./Training/train.csv"  # columns: filepath, label
 CSV_VAL = "./Training/val.csv"
-NUM_CLASSES = 59         # Change this to your number of bird species
+NUM_CLASSES = 64         # Change this to your number of bird species
 BATCH_SIZE = 16          # PaSST is heavy; reduce this if you get CUDA OOM
 LEARNING_RATE = 1e-5     # Low LR is best for finetuning
 EPOCHS = 20
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-SAVE_DIR = "./checkpoints"
-LOG_DIR = "./logs"
+SAVE_DIR = "/dev/shm/schoen/checkpoints"
+LOG_DIR = "/dev/shm/schoen/logs"
 RUN_NAME = "passt_finetune"
 
 SAVE_EVERY_EPOCH = True        # if disk is an issue set False
@@ -202,7 +202,7 @@ def main():
     model = get_passt_model(NUM_CLASSES).to(DEVICE)
 
     # 2.5 Optional: Adjust Patchout Difficulty
-    set_patchout_difficulty(model, difficulty="standard")
+    set_patchout_difficulty(model, difficulty="hard")
 
     # 3. Optimizer & Loss
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=0.0001)
