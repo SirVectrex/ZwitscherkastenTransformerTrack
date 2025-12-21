@@ -2,78 +2,66 @@ import torch
 from torch.utils.data import Dataset
 import numpy as np
 import pandas as pd
+import json
 
 class MelDataset(Dataset):
-    def __init__(self, csv_file, target_len=998):
+    def __init__(self, csv_file, stats_file=None, target_len=998):
         self.data = pd.read_csv(csv_file)
         self.target_len = target_len
+        
+        # Standardwerte (Fallback, falls keine Datei kommt)
+        self.mean = 0.0
+        self.std = 1.0
+
+        # Stats laden, falls vorhanden
+        if stats_file:
+            print(f"Lade Stats aus: {stats_file}")
+            with open(stats_file, 'r') as f:
+                stats = json.load(f)
+                self.mean = stats['mean']
+                self.std = stats['std']
+            print(f"Normalisierung aktiv: Mean={self.mean:.4f}, Std={self.std:.4f}")
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
         path = self.data.iloc[idx]['filepath']
-        label = self.data.iloc[idx]['label']
+        label = int(self.data.iloc[idx]['label'])
         
-        # 1. Load uint8 data [Shape: 128, Time]
-        mel = np.load(path)
-        
-        # 2. CONVERT UINT8 TO FLOAT
-        # We assume uint8 maps 0->255. We scale to 0.0->1.0
-        mel = mel.astype(np.float32) / 255.0
-        
-        # --- dataset.py - Inside MelDataset's __getitem__ method ---
+        # 1. Load data
+        try:
+            mel = np.load(path).astype(np.float32)
+        except Exception as e:
+            # Falls Datei kaputt ist, leeres Array zurückgeben (verhindert Crash)
+            print(f"Fehler bei {path}: {e}")
+            mel = np.zeros((128, self.target_len), dtype=np.float32)
 
-        # ... (After loading and converting to float) ...
-        
-        # 3. Convert to Torch
-        mel = torch.from_numpy(mel)
-        
-        # 4. Remove any existing extra dims, just in case
-        # This addresses potential issues from how the NPY files were saved.
-        if mel.ndim == 3 and mel.shape[0] == 1 and mel.shape[1] == 128:
-            # If shape is already [1, 128, T], we are fine.
-            pass
-        
-        # 5. Ensure Channel Dimension is CORRECTLY [1, 128, Time]
-        # If the shape is [128, Time] (most common way to save a 2D spectrogram),
-        # we unsqueeze the channel dimension (C=1) at the front.
-        if mel.ndim == 2:
-            mel = mel.unsqueeze(0) # Shape becomes [1, 128, Time]
-        
-        # CRITICAL: If your NPY was saved as a 3D array [1, 128, Time] 
-        # but the DataLoader is still adding a dim, let's fix the squeeze now:
-        # We will remove any dimension where the size is 1, except for the first one 
-        # which is the true channel dimension.
-
-        # 6. Final Clean-up (Preventing the error)
-        # The redundant '1' dimension is being inserted somewhere. 
-        # We use .squeeze() to remove all dimensions of size 1.
-        mel = mel.squeeze()
-        
-        # After squeezing, ensure shape is exactly [1, 128, Time]
-        if mel.ndim == 2:
-            # If it was fully squeezed down to 2D, restore the channel dimension
-            mel = mel.unsqueeze(0)
-        
-        # ... (Continue with the LOOPING and Normalization logic) ...
-
-        # ... (Rest of the function remains the same) ...
-
-        # 5. LOOPING (Handling short audio)
+        # 2. Dimensions Check [128, Time]
+        # Falls es [1, 128, Time] ist -> [128, Time] machen für einfacheres Handling
+        if mel.ndim == 3:
+            mel = mel.squeeze(0)
+            
+        # 3. Looping (Handling short audio) - DEINE WICHTIGE LOGIK
         curr_len = mel.shape[-1]
         if curr_len < self.target_len:
             n_repeats = (self.target_len // curr_len) + 1
-            mel = mel.repeat(1, 1, n_repeats)
+            # Wir nutzen numpy repeat, das ist oft stabiler hier
+            mel = np.tile(mel, (1, n_repeats))
         
-        # Crop to exact target length
-        mel = mel[:, :, :self.target_len]
+        # Crop to exact target length (auf 998 kürzen)
+        mel = mel[:, :self.target_len]
 
-        # 6. PaSST Normalization
-        # PaSST was trained on AudioSet with specific normalization.
-        # Since we just converted 0-255 to 0-1, we should shift it to be roughly -1 to 1.
-        # (This is a standard approximation for PaSST inputs)
-        mel = (mel * 2.0) - 1.0
+        # 4. ECHTE NORMALISIERUNG (Das ist neu!)
+        # Wir rechnen auf den Rohdaten, genau wie prepare_data es berechnet hat.
+        # (Pixel - Mean) / Std
+        mel = (mel - self.mean) / self.std
 
+        # 5. Convert to Torch Tensor
+        mel_tensor = torch.from_numpy(mel)
+        
+        # 6. Channel Dimension hinzufügen [1, 128, 998]
+        # PaSST erwartet [Batch, Channel, Freq, Time]
+        mel_tensor = mel_tensor.unsqueeze(0)
 
-        return mel, torch.tensor(label).long()
+        return mel_tensor, torch.tensor(label).long()
