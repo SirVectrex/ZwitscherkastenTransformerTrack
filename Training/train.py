@@ -10,6 +10,8 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
+import numpy as np
+
 from hear21passt.base import get_basic_model
 from tqdm import tqdm
 
@@ -68,6 +70,27 @@ def save_checkpoint(path: str, model: nn.Module, optimizer: optim.Optimizer,
     torch.save(ckpt, path)
 
 
+def mixup_data(x, y, alpha=0.4, use_cuda=True):
+    '''Returns mixed inputs, pairs of targets, and lambda'''
+    if alpha > 0:
+        lam = np.random.beta(alpha, alpha)
+    else:
+        lam = 1
+
+    batch_size = x.size(0)
+    if use_cuda:
+        index = torch.randperm(batch_size).cuda()
+    else:
+        index = torch.randperm(batch_size)
+
+    mixed_x = lam * x + (1 - lam) * x[index, :]
+    y_a, y_b = y, y[index]
+    return mixed_x, y_a, y_b, lam
+
+def mixup_criterion(criterion, pred, y_a, y_b, lam):
+    return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
+
+
 def train_one_epoch(model: nn.Module,
                     loader: DataLoader,
                     criterion: nn.Module,
@@ -95,6 +118,19 @@ def train_one_epoch(model: nn.Module,
 
         logits = model(mels)
         loss = criterion(logits, labels)
+
+        # ---------------- MIXUP START ----------------
+        # Wir würfeln: Soll Mixup in diesem Batch passieren? (Meistens ja)
+        # alpha=0.4 ist Standard für Audio/ImageNet
+        mels, labels_a, labels_b, lam = mixup_data(mels, labels, alpha=0.4, use_cuda=True)
+        
+        # Variable wrapping ist in neuem PyTorch nicht mehr nötig, aber mels ist jetzt "mixed"
+        
+        logits = model(mels)
+        
+        # Loss berechnen (Mischung aus Loss A und Loss B)
+        loss = mixup_criterion(criterion, logits, labels_a, labels_b, lam)
+        # ---------------- MIXUP ENDE -----------------
 
         loss.backward()
         optimizer.step()
@@ -180,8 +216,12 @@ def main():
 
     # 1. Data Setup
     print("Setting up data...")
-    train_dataset = MelDataset(CSV_TRAIN)
-    val_dataset = MelDataset(CSV_VAL)
+    # Pfad zu den Stats, die wir eben erstellt haben
+    STATS_FILE = "/dev/shm/schoen/output/normalization_stats.json"
+    
+    # Wir übergeben den Pfad an das Dataset
+    train_dataset = MelDataset(CSV_TRAIN, stats_file=STATS_FILE)
+    val_dataset = MelDataset(CSV_VAL, stats_file=STATS_FILE)
 
     train_loader = DataLoader(
         train_dataset,
