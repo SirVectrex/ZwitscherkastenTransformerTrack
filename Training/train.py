@@ -205,7 +205,7 @@ def main():
     set_patchout_difficulty(model, difficulty="hard")
 
     # 3. Optimizer & Loss
-    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=0.0001)
+    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=0.01)
     criterion = nn.CrossEntropyLoss()
 
     # CSV header
