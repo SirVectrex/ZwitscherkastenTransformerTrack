@@ -23,7 +23,7 @@ CSV_TRAIN = "./Training/train.csv"  # columns: filepath, label
 CSV_VAL = "./Training/val.csv"
 NUM_CLASSES = 64         # Change this to your number of bird species
 BATCH_SIZE = 16          # PaSST is heavy; reduce this if you get CUDA OOM
-LEARNING_RATE = 1e-3     # Low LR is best for finetuning
+LEARNING_RATE = 1e-3     # Initial Value (will be overwritten if Phase 2)
 EPOCHS = 20
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -35,12 +35,13 @@ SAVE_EVERY_EPOCH = True        # if disk is an issue set False
 EARLY_STOP_PATIENCE = 5        # epochs without val_acc improvement before stopping
 
 PHASE = 2
+LOAD_CHECKPOINT = None  # Default init
 
 # --- CONFIG PHASE 2 ---
 if PHASE == 2:
-	LOAD_CHECKPOINT = "/dev/shm/schoen/checkpoints/Bestmodell_phase1.pth" 
-	LEARNING_RATE = 5e-6    
-	EPOCHS = 30             
+    LOAD_CHECKPOINT = "/dev/shm/schoen/checkpoints/Bestmodell_phase1.pth" 
+    LEARNING_RATE = 5e-6    
+    EPOCHS = 30             
 
 def get_passt_model(num_classes: int):
     print("Loading PaSST model...")
@@ -77,7 +78,7 @@ def save_checkpoint(path: str, model: nn.Module, optimizer: optim.Optimizer,
     torch.save(ckpt, path)
 
 
-def mixup_data(x, y, alpha=0.4, use_cuda=True):
+def mixup_data(x, y, alpha=0.4):
     '''Returns mixed inputs, pairs of targets, and lambda'''
     if alpha > 0:
         lam = np.random.beta(alpha, alpha)
@@ -85,10 +86,8 @@ def mixup_data(x, y, alpha=0.4, use_cuda=True):
         lam = 1
 
     batch_size = x.size(0)
-    if use_cuda:
-        index = torch.randperm(batch_size).cuda()
-    else:
-        index = torch.randperm(batch_size)
+    # Nutzt automatisch das gleiche Device wie die Input-Daten (CPU oder CUDA)
+    index = torch.randperm(batch_size).to(x.device)
 
     mixed_x = lam * x + (1 - lam) * x[index, :]
     y_a, y_b = y, y[index]
@@ -126,38 +125,41 @@ def train_one_epoch(model: nn.Module,
         if PHASE == 1:
             logits = model(mels)
             loss = criterion(logits, labels)
+            # Für Accuracy Berechnung unten vorbereiten
+            targets = labels
 
         if PHASE == 2:
             # ---------------- MIXUP START ----------------
-            # Wir würfeln: Soll Mixup in diesem Batch passieren? (Meistens ja)
-            alpha=0.4 #ist Standard für Audio/ImageNet
-            mels, labels_a, labels_b, lam = mixup_data(mels, labels, alpha=0.4, use_cuda=True)
+            alpha_val = 0.4
+            mels_mixed, labels_a, labels_b, lam = mixup_data(mels, labels, alpha=alpha_val)
         
-            # Variable wrapping ist in neuem PyTorch nicht mehr nötig, aber mels ist jetzt "mixed"
-        
-            logits = model(mels)
+            logits = model(mels_mixed)
         
             # Loss berechnen (Mischung aus Loss A und Loss B)
             loss = mixup_criterion(criterion, logits, labels_a, labels_b, lam)
             # ---------------- MIXUP ENDE -----------------
+            
+            # Für Accuracy: Wir brauchen wieder EINE Wahrheit (die stärkere Klasse)
+            # Da labels hier noch die originalen Indizes sind, ist 'labels' eigentlich okay,
+            # aber targets für den Vergleich unten definieren:
+            targets = labels 
 
         loss.backward()
         optimizer.step()
 
         running_loss += loss.item()
 
+        # Accuracy Berechnung
         _, predicted = torch.max(logits, 1)
         
-	if len(labels.size()) > 1: 
-    	    # Wenn labels mehr als 1 Dimension hat (also eine Liste pro Bild ist),
-            # dann holen wir uns den Index mit dem höchsten Wert (z.B. die 0.7 für die Amsel).
-    	    _, targets = torch.max(labels, 1)
-	else:
-    	    # Wenn es noch Phase 1 ist (normale Labels), nehmen wir sie einfach so.
-    	    targets = labels
+        # Sicherheits-Check falls Labels doch mal One-Hot wären (bei Mixup V2)
+        if len(targets.size()) > 1: 
+             _, final_targets = torch.max(targets, 1)
+        else:
+             final_targets = targets
         
-        total += targets.size(0)
-        correct += (predicted == labels).sum().item()
+        total += final_targets.size(0)
+        correct += (predicted == final_targets).sum().item()
 
         if writer is not None:
             writer.add_scalar("train/batch_loss", loss.item(), global_step)
@@ -202,10 +204,6 @@ def validate(model: nn.Module, loader: DataLoader, criterion: nn.Module):
 def set_patchout_difficulty(model: nn.Module, difficulty: str = "standard"):
     """
     Adjusts the structured Patchout (dropping time/freq strips).
-
-    Standard PaSST (10s clips):
-    - s_patchout_t: Drops time columns (vertical strips)
-    - s_patchout_f: Drops freq rows (horizontal strips)
     """
     if difficulty == "hard":
         model.net.s_patchout_t = 40
@@ -234,10 +232,8 @@ def main():
 
     # 1. Data Setup
     print("Setting up data...")
-    # Pfad zu den Stats, die wir eben erstellt haben
     STATS_FILE = "/dev/shm/schoen/output/normalization_stats.json"
     
-    # Wir übergeben den Pfad an das Dataset
     train_dataset = MelDataset(CSV_TRAIN, stats_file=STATS_FILE)
     val_dataset = MelDataset(CSV_VAL, stats_file=STATS_FILE)
 
@@ -261,49 +257,52 @@ def main():
 
     # 2.5 Optional: Adjust Patchout Difficulty
     if PHASE == 2:
-	set_patchout_difficulty(model, difficulty="hard")
+        set_patchout_difficulty(model, difficulty="hard")
     else:
         set_patchout_difficulty(model, difficulty="standard")
 
     if LOAD_CHECKPOINT:
         print(f"--- Lade Phase 1: {LOAD_CHECKPOINT} ---")
+        # map_location sorgt dafür, dass es auch lädt, wenn GPUs unterschiedlich sind
         checkpoint = torch.load(LOAD_CHECKPOINT, map_location=DEVICE)
-        model.load_state_dict(checkpoint["model_state"])
+        
+        # Schlüssel anpassen, falls nötig (z.B. wenn Checkpoint 'module.' prefix hat)
+        state_dict = checkpoint["model_state"]
+        # model.load_state_dict(state_dict) # Strict=True ist standard, False ist sicherer bei kleinen Abweichungen
+        try:
+            model.load_state_dict(state_dict)
+        except RuntimeError as e:
+            print(f"Warnung beim Laden (versuche strict=False): {e}")
+            model.load_state_dict(state_dict, strict=False)
 
     if PHASE != 2:
-    # --- FREEZING ---
+        # --- FREEZING (Nur Phase 1) ---
         print("Friere das Basis-Modell ein. Trainiere nur den Kopf...")
-    
         for name, param in model.named_parameters():
-            # Wir wollen den 'head' (Klassifizierer) trainieren
             if "head" in name:
                 param.requires_grad = True
-                print(f"  Trainiere: {name}")
-            # Wir lassen oft auch die Normalisierungs-Schichten (norm) offen, 
-            # das hilft dem Modell, sich an die Statistik deiner Daten anzupassen
             elif "norm" in name:
                 param.requires_grad = True
-            # Alles andere (der riesige Transformer-Körper) wird eingefroren
             else:
                 param.requires_grad = False
             
-        # Zähle, wie viele Parameter wir noch trainieren
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         total_params = sum(p.numel() for p in model.parameters())
         print(f"Trainierbare Parameter: {trainable_params} von {total_params} ({(trainable_params/total_params):.1%})")
-        #  ---------------------------------------------
     else:
+        # --- UNFREEZE (Phase 2) ---
+        print("Phase 2: Unfreeze All Parameters for Fine-Tuning")
         for param in model.parameters():
             param.requires_grad = True
 
     # 3. Optimizer & Loss
-    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=0.01)
+    # Wichtig: optimizer darf nur Parameter bekommen, die requires_grad=True haben
+    optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), 
+                            lr=LEARNING_RATE, weight_decay=0.01)
     
-    # Senkt die LR langsam ab (Cosine Annealing)
-    # T_max muss gleich der Anzahl der Epochen sein
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
-    criterion = nn.CrossEntropyLoss(label_smoothing = 0.1)
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
     # CSV header
     with open(csv_path, "w", newline="") as f:
@@ -327,7 +326,6 @@ def main():
         epoch_time = time.time() - t0
         
         scheduler.step()
-	
         lr = get_lr(optimizer)
 
         # Console
@@ -336,30 +334,26 @@ def main():
         print(f"Val Loss:   {val_loss:.4f} | Val Acc:   {val_acc:.4f}")
         print(f"LR: {lr:.2e} | Time: {epoch_time:.1f}s")
 
-        # TensorBoard (epoch metrics)
+        # TensorBoard
         writer.add_scalar("train/epoch_loss", train_loss, epoch)
         writer.add_scalar("train/epoch_acc", train_acc, epoch)
         writer.add_scalar("val/loss", val_loss, epoch)
         writer.add_scalar("val/acc", val_acc, epoch)
         writer.add_scalar("train/lr", lr, epoch)
 
-        # Helpful diagnostics for overfitting
-        writer.add_scalar("diagnostics/acc_gap", train_acc - val_acc, epoch)
-        writer.add_scalar("diagnostics/loss_gap", val_loss - train_loss, epoch)
-
         # CSV logging
         with open(csv_path, "a", newline="") as f:
             w = csv.writer(f)
             w.writerow([epoch + 1, train_loss, train_acc, val_loss, val_acc, lr, epoch_time])
 
-        # Save checkpoint each epoch (optional)
+        # Save checkpoint
         if SAVE_EVERY_EPOCH:
             save_checkpoint(
                 os.path.join(SAVE_DIR, f"epoch_{epoch+1:03d}.pth"),
                 model, optimizer, epoch + 1, best_acc
             )
 
-        # Save best model/checkpoint
+        # Save best model
         if val_acc > best_acc:
             best_acc = val_acc
             best_epoch = epoch + 1
@@ -368,32 +362,12 @@ def main():
             save_checkpoint(
                 os.path.join(SAVE_DIR, "best_model.pth"),
                 model, optimizer, epoch + 1, best_acc,
-                extra={"train_loss": train_loss, "train_acc": train_acc, "val_loss": val_loss, "val_acc": val_acc}
+                extra={"val_acc": val_acc}
             )
-
-            with open(best_meta_path, "w") as f:
-                json.dump(
-                    {
-                        "run_id": run_id,
-                        "best_epoch": best_epoch,
-                        "best_val_acc": best_acc,
-                        "best_train_loss": train_loss,
-                        "best_train_acc": train_acc,
-                        "best_val_loss": val_loss,
-                        "best_val_acc_dup": val_acc,
-                        "tensorboard_dir": tb_dir,
-                        "csv_path": csv_path,
-                        "saved_best_ckpt": os.path.join(SAVE_DIR, "best_model.pth"),
-                    },
-                    f,
-                    indent=2,
-                )
-
             print(f"Saved Best Model (epoch {best_epoch})!")
         else:
             epochs_since_improve += 1
 
-        # Early stopping
         if epochs_since_improve >= EARLY_STOP_PATIENCE:
             print(f"Early stopping: no val_acc improvement for {EARLY_STOP_PATIENCE} epochs.")
             break
@@ -401,11 +375,7 @@ def main():
         print("-" * 30)
 
     writer.close()
-    print(f"Logs saved to: {csv_path}")
-    print(f"TensorBoard dir: {tb_dir}")
-    if best_epoch != -1:
-        print(f"Best epoch: {best_epoch} | Best val acc: {best_acc:.4f}")
-
+    print("Done.")
 
 if __name__ == "__main__":
     main()
