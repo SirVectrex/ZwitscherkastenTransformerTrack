@@ -122,14 +122,14 @@ def train_one_epoch(model: nn.Module,
         # ---------------- MIXUP START ----------------
         # Wir würfeln: Soll Mixup in diesem Batch passieren? (Meistens ja)
         # alpha=0.4 ist Standard für Audio/ImageNet
-        mels, labels_a, labels_b, lam = mixup_data(mels, labels, alpha=0.4, use_cuda=True)
+        #mels, labels_a, labels_b, lam = mixup_data(mels, labels, alpha=0.4, use_cuda=True)
         
         # Variable wrapping ist in neuem PyTorch nicht mehr nötig, aber mels ist jetzt "mixed"
         
-        logits = model(mels)
+        #logits = model(mels)
         
         # Loss berechnen (Mischung aus Loss A und Loss B)
-        loss = mixup_criterion(criterion, logits, labels_a, labels_b, lam)
+        #loss = mixup_criterion(criterion, logits, labels_a, labels_b, lam)
         # ---------------- MIXUP ENDE -----------------
 
         loss.backward()
@@ -246,6 +246,11 @@ def main():
 
     # 3. Optimizer & Loss
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=0.01)
+    
+    # Senkt die LR langsam ab (Cosine Annealing)
+    # T_max muss gleich der Anzahl der Epochen sein
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+
     criterion = nn.CrossEntropyLoss()
 
     # CSV header
@@ -268,6 +273,9 @@ def main():
         val_loss, val_acc = validate(model, val_loader, criterion)
 
         epoch_time = time.time() - t0
+        
+        scheduler.step()
+	
         lr = get_lr(optimizer)
 
         # Console
