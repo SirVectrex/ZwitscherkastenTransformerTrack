@@ -244,6 +244,28 @@ def main():
     # 2.5 Optional: Adjust Patchout Difficulty
     set_patchout_difficulty(model, difficulty="hard")
 
+# --- FREEZING (Die Anti-Overfitting Waffe) ---
+    print("Friere das Basis-Modell ein. Trainiere nur den Kopf...")
+    
+    for name, param in model.named_parameters():
+        # Wir wollen den 'head' (Klassifizierer) trainieren
+        if "head" in name:
+            param.requires_grad = True
+            print(f"  Trainiere: {name}")
+        # Wir lassen oft auch die Normalisierungs-Schichten (norm) offen, 
+        # das hilft dem Modell, sich an die Statistik deiner Daten anzupassen
+        elif "norm" in name:
+            param.requires_grad = True
+        # Alles andere (der riesige Transformer-Körper) wird eingefroren
+        else:
+            param.requires_grad = False
+            
+    # Zähle, wie viele Parameter wir noch trainieren
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Trainierbare Parameter: {trainable_params} von {total_params} ({(trainable_params/total_params):.1%})")
+    # ---------------------------------------------
+
     # 3. Optimizer & Loss
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=0.01)
     
