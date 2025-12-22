@@ -23,7 +23,7 @@ CSV_TRAIN = "./Training/train.csv"  # columns: filepath, label
 CSV_VAL = "./Training/val.csv"
 NUM_CLASSES = 64         # Change this to your number of bird species
 BATCH_SIZE = 16          # PaSST is heavy; reduce this if you get CUDA OOM
-LEARNING_RATE = 1e-5     # Low LR is best for finetuning
+LEARNING_RATE = 1e-3     # Low LR is best for finetuning
 EPOCHS = 20
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -34,6 +34,13 @@ RUN_NAME = "passt_finetune"
 SAVE_EVERY_EPOCH = True        # if disk is an issue set False
 EARLY_STOP_PATIENCE = 5        # epochs without val_acc improvement before stopping
 
+PHASE = 2
+
+# --- CONFIG PHASE 2 ---
+if PHASE == 2:
+	LOAD_CHECKPOINT = "/dev/shm/schoen/checkpoints/Bestmodell_phase1.pth" 
+	LEARNING_RATE = 5e-6    
+	EPOCHS = 30             
 
 def get_passt_model(num_classes: int):
     print("Loading PaSST model...")
@@ -115,22 +122,24 @@ def train_one_epoch(model: nn.Module,
             mels = mels.squeeze(1)  # [B, 128, 998]
         elif mels.dim() != 3:
             raise ValueError(f"Unexpected mel shape: {tuple(mels.shape)}")
+        
+        if PHASE == 1:
+            logits = model(mels)
+            loss = criterion(logits, labels)
 
-        logits = model(mels)
-        loss = criterion(logits, labels)
-
-        # ---------------- MIXUP START ----------------
-        # Wir würfeln: Soll Mixup in diesem Batch passieren? (Meistens ja)
-        # alpha=0.4 ist Standard für Audio/ImageNet
-        #mels, labels_a, labels_b, lam = mixup_data(mels, labels, alpha=0.4, use_cuda=True)
+        if PHASE == 2:
+            # ---------------- MIXUP START ----------------
+            # Wir würfeln: Soll Mixup in diesem Batch passieren? (Meistens ja)
+            alpha=0.4 #ist Standard für Audio/ImageNet
+            mels, labels_a, labels_b, lam = mixup_data(mels, labels, alpha=0.4, use_cuda=True)
         
-        # Variable wrapping ist in neuem PyTorch nicht mehr nötig, aber mels ist jetzt "mixed"
+            # Variable wrapping ist in neuem PyTorch nicht mehr nötig, aber mels ist jetzt "mixed"
         
-        #logits = model(mels)
+            logits = model(mels)
         
-        # Loss berechnen (Mischung aus Loss A und Loss B)
-        #loss = mixup_criterion(criterion, logits, labels_a, labels_b, lam)
-        # ---------------- MIXUP ENDE -----------------
+            # Loss berechnen (Mischung aus Loss A und Loss B)
+            loss = mixup_criterion(criterion, logits, labels_a, labels_b, lam)
+            # ---------------- MIXUP ENDE -----------------
 
         loss.backward()
         optimizer.step()
@@ -138,7 +147,16 @@ def train_one_epoch(model: nn.Module,
         running_loss += loss.item()
 
         _, predicted = torch.max(logits, 1)
-        total += labels.size(0)
+        
+	if len(labels.size()) > 1: 
+    	    # Wenn labels mehr als 1 Dimension hat (also eine Liste pro Bild ist),
+            # dann holen wir uns den Index mit dem höchsten Wert (z.B. die 0.7 für die Amsel).
+    	    _, targets = torch.max(labels, 1)
+	else:
+    	    # Wenn es noch Phase 1 ist (normale Labels), nehmen wir sie einfach so.
+    	    targets = labels
+        
+        total += targets.size(0)
         correct += (predicted == labels).sum().item()
 
         if writer is not None:
@@ -242,29 +260,41 @@ def main():
     model = get_passt_model(NUM_CLASSES).to(DEVICE)
 
     # 2.5 Optional: Adjust Patchout Difficulty
-    set_patchout_difficulty(model, difficulty="hard")
+    if PHASE == 2:
+	set_patchout_difficulty(model, difficulty="hard")
+    else:
+        set_patchout_difficulty(model, difficulty="standard")
 
-# --- FREEZING (Die Anti-Overfitting Waffe) ---
-    print("Friere das Basis-Modell ein. Trainiere nur den Kopf...")
+    if LOAD_CHECKPOINT:
+        print(f"--- Lade Phase 1: {LOAD_CHECKPOINT} ---")
+        checkpoint = torch.load(LOAD_CHECKPOINT, map_location=DEVICE)
+        model.load_state_dict(checkpoint["model_state"])
+
+    if PHASE != 2:
+    # --- FREEZING ---
+        print("Friere das Basis-Modell ein. Trainiere nur den Kopf...")
     
-    for name, param in model.named_parameters():
-        # Wir wollen den 'head' (Klassifizierer) trainieren
-        if "head" in name:
-            param.requires_grad = True
-            print(f"  Trainiere: {name}")
-        # Wir lassen oft auch die Normalisierungs-Schichten (norm) offen, 
-        # das hilft dem Modell, sich an die Statistik deiner Daten anzupassen
-        elif "norm" in name:
-            param.requires_grad = True
-        # Alles andere (der riesige Transformer-Körper) wird eingefroren
-        else:
-            param.requires_grad = False
+        for name, param in model.named_parameters():
+            # Wir wollen den 'head' (Klassifizierer) trainieren
+            if "head" in name:
+                param.requires_grad = True
+                print(f"  Trainiere: {name}")
+            # Wir lassen oft auch die Normalisierungs-Schichten (norm) offen, 
+            # das hilft dem Modell, sich an die Statistik deiner Daten anzupassen
+            elif "norm" in name:
+                param.requires_grad = True
+            # Alles andere (der riesige Transformer-Körper) wird eingefroren
+            else:
+                param.requires_grad = False
             
-    # Zähle, wie viele Parameter wir noch trainieren
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"Trainierbare Parameter: {trainable_params} von {total_params} ({(trainable_params/total_params):.1%})")
-    # ---------------------------------------------
+        # Zähle, wie viele Parameter wir noch trainieren
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"Trainierbare Parameter: {trainable_params} von {total_params} ({(trainable_params/total_params):.1%})")
+        #  ---------------------------------------------
+    else:
+        for param in model.parameters():
+            param.requires_grad = True
 
     # 3. Optimizer & Loss
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=0.01)
@@ -273,7 +303,7 @@ def main():
     # T_max muss gleich der Anzahl der Epochen sein
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing = 0.1)
 
     # CSV header
     with open(csv_path, "w", newline="") as f:
