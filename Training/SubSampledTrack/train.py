@@ -20,16 +20,13 @@ except ImportError:
     print("Please install PaSST: pip install hear21passt")
     exit()
 
-# Local Import
 from dataset import MelDataset
 
 # --- GLOBAL CONFIGURATION ---
 CURRENT_DIR = Path(__file__).parent.resolve()
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# Logic control
-PHASE = 2  # 1: Head only, 2: Full Fine-Tuning
-MIXUP_ALPHA = 0.4 if PHASE == 2 else 0.0
+PHASE = 2  
 
 CONFIG = {
     "paths": {
@@ -39,178 +36,143 @@ CONFIG = {
         "class_map": CURRENT_DIR / "class_map.json",
         "checkpoint_dir": CURRENT_DIR / "checkpoints",
         "log_dir": CURRENT_DIR / "logs",
-        "load_checkpoint": CURRENT_DIR / "best_passt_model.pth" if PHASE == 2 else None
+        "load_checkpoint": CURRENT_DIR / "checkpoints" / "best_model_phase_1.pth" 
     },
     "hyperparams": {
         "batch_size": 16,
-        "epochs": 20 if PHASE == 1 else 30,
-        "lr": 1e-4 if PHASE == 1 else 5e-6,
+        "epochs": 30,
+        "lr": 1e-5,
         "weight_decay": 0.0001,
         "label_smoothing": 0.1,
-        "max_grad_norm": 1.0,  # For stability
     }
 }
 
-# --- UTILS ---
-
+# --- MODEL UTILS ---
 def get_passt_model(num_classes: int):
-    print(f"Initializing PaSST for {num_classes} classes...")
-    model = get_basic_model(mode="logits") # Mode logits for raw output
-    
-    # Replace head
-    in_features = model.net.head.in_features if not isinstance(model.net.head, nn.Sequential) else model.net.head[-1].in_features
-    model.net.head = nn.Linear(in_features, num_classes)
+    model = get_basic_model(mode="logits")
+    if isinstance(model.net.head, nn.Sequential):
+        in_features = model.net.head[-1].in_features
+        model.net.head[-1] = nn.Linear(in_features, num_classes)
+    else:
+        in_features = model.net.head.in_features
+        model.net.head = nn.Linear(in_features, num_classes)
     return model
 
 def mixup_data(x, y, alpha=0.4):
-    if alpha > 0:
-        lam = np.random.beta(alpha, alpha)
-    else:
-        lam = 1
-    batch_size = x.size(0)
-    index = torch.randperm(batch_size).to(DEVICE)
+    lam = np.random.beta(alpha, alpha) if alpha > 0 else 1
+    index = torch.randperm(x.size(0)).to(DEVICE)
     mixed_x = lam * x + (1 - lam) * x[index, :]
-    y_a, y_b = y, y[index]
-    return mixed_x, y_a, y_b, lam
+    return mixed_x, y, y[index], lam
 
 def mixup_criterion(criterion, pred, y_a, y_b, lam):
     return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
 
-def set_patchout(model, phase):
-    if phase == 2:
-        model.net.s_patchout_t = 40 # Higher regularization for fine-tuning
-        model.net.s_patchout_f = 6
-    else:
-        model.net.s_patchout_t = 20
-        model.net.s_patchout_f = 4
-
-# --- ENGINE ---
-
-def train_one_epoch(model, loader, criterion, optimizer, scheduler, writer, epoch, global_step):
-    model.train()
-    running_loss, correct, total = 0.0, 0.0, 0
-    
-    pbar = tqdm(loader, desc=f"Epoch {epoch+1}")
-    for images, labels in pbar:
-        images, labels = images.to(DEVICE), labels.to(DEVICE)
-        
-        # Mixup logic
-        lam = 1.0
-        if PHASE == 2 and MIXUP_ALPHA > 0:
-            images, labels_a, labels_b, lam = mixup_data(images, labels, MIXUP_ALPHA)
-        
-        optimizer.zero_grad(set_to_none=True)
-        outputs = model(images)
-        
-        if PHASE == 2 and MIXUP_ALPHA > 0:
-            loss = mixup_criterion(criterion, outputs, labels_a, labels_b, lam)
-        else:
-            loss = criterion(outputs, labels)
-            
-        loss.backward()
-        
-        # Gradient Clipping for stability
-        torch.nn.utils.clip_grad_norm_(model.parameters(), CONFIG["hyperparams"]["max_grad_norm"])
-        
-        optimizer.step()
-        scheduler.step()
-
-        running_loss += loss.item()
-        
-        # Accurate Accuracy calculation for Mixup
-        _, predicted = torch.max(outputs.data, 1)
-        total += labels.size(0)
-        if PHASE == 2 and MIXUP_ALPHA > 0:
-            correct += (lam * predicted.eq(labels_a).sum().item() + (1 - lam) * predicted.eq(labels_b).sum().item())
-        else:
-            correct += (predicted == labels).sum().item()
-            
-        global_step += 1
-        pbar.set_postfix(loss=running_loss/total, acc=100.*correct/total)
-        writer.add_scalar("Loss/train_batch", loss.item(), global_step)
-
-    return running_loss / len(loader), 100. * correct / total, global_step
-
-@torch.no_grad()
-def validate(model, loader, criterion):
-    model.eval()
-    val_loss, correct, total = 0.0, 0, 0
-    for images, labels in loader:
-        images, labels = images.to(DEVICE), labels.to(DEVICE)
-        outputs = model(images)
-        loss = criterion(outputs, labels)
-        val_loss += loss.item()
-        _, predicted = torch.max(outputs.data, 1)
-        total += labels.size(0)
-        correct += (predicted == labels).sum().item()
-    return val_loss / len(loader), 100. * correct / total
-
-# --- MAIN ---
-
+# --- TRACKING ENGINE ---
 def main():
-    os.makedirs(CONFIG["paths"]["checkpoint_dir"], exist_ok=True)
-    os.makedirs(CONFIG["paths"]["log_dir"], exist_ok=True)
+    CONFIG["paths"]["checkpoint_dir"].mkdir(parents=True, exist_ok=True)
+    CONFIG["paths"]["log_dir"].mkdir(parents=True, exist_ok=True)
     
-    # 1. Setup Data
     with open(CONFIG["paths"]["class_map"]) as f:
         num_classes = len(json.load(f))
 
+    # Initialize Logging Tools
+    run_name = f"phase_{PHASE}_{time.strftime('%Y%m%d-%H%M%S')}"
+    writer = SummaryWriter(CONFIG["paths"]["log_dir"] / run_name)
+    csv_log_path = CONFIG["paths"]["log_dir"] / f"{run_name}_metrics.csv"
+    
+    with open(csv_log_path, 'w', newline='') as f:
+        writer_csv = csv.writer(f)
+        writer_csv.writerow(['epoch', 'train_loss', 'train_acc', 'val_loss', 'val_acc', 'lr'])
+
+    # 1. Model & Data
+    model = get_passt_model(num_classes).to(DEVICE)
+    
+    if PHASE == 2 and CONFIG["paths"]["load_checkpoint"].exists():
+        model.load_state_dict(torch.load(CONFIG["paths"]["load_checkpoint"], map_location=DEVICE), strict=False)
+    
     train_dataset = MelDataset(CONFIG["paths"]["train_csv"], CONFIG["paths"]["stats_json"], mode='train')
     val_dataset = MelDataset(CONFIG["paths"]["val_csv"], CONFIG["paths"]["stats_json"], mode='val')
-
-    train_loader = DataLoader(train_dataset, batch_size=CONFIG["hyperparams"]["batch_size"], shuffle=True, num_workers=8, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=CONFIG["hyperparams"]["batch_size"], shuffle=True, num_workers=4)
     val_loader = DataLoader(val_dataset, batch_size=CONFIG["hyperparams"]["batch_size"], shuffle=False, num_workers=4)
 
-    # 2. Setup Model
-    model = get_passt_model(num_classes).to(DEVICE)
-    set_patchout(model, PHASE)
-
-    if PHASE == 2 and CONFIG["paths"]["load_checkpoint"]:
-        print(f"Loading Phase 1 Weights from {CONFIG['paths']['load_checkpoint']}")
-        model.load_state_dict(torch.load(CONFIG["paths"]["load_checkpoint"], map_location=DEVICE), strict=False)
-
-    # 3. Freeze/Unfreeze
-    if PHASE == 1:
-        for name, param in model.named_parameters():
-            param.requires_grad = "head" in name or "norm" in name
-    else:
-        for param in model.parameters():
-            param.requires_grad = True
-
-    # 4. Optimizer & Scheduler
-    optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), 
-                            lr=CONFIG["hyperparams"]["lr"], 
-                            weight_decay=CONFIG["hyperparams"]["weight_decay"])
-    
-    # OneCycleLR is often better than Cosine for Transformer convergence
-    scheduler = optim.lr_scheduler.OneCycleLR(
-        optimizer, 
-        max_lr=CONFIG["hyperparams"]["lr"] * 5, 
-        steps_per_epoch=len(train_loader), 
-        epochs=CONFIG["hyperparams"]["epochs"]
-    )
-
+    # 2. Optimization
+    optimizer = optim.AdamW(model.parameters(), lr=CONFIG["hyperparams"]["lr"], weight_decay=CONFIG["hyperparams"]["weight_decay"])
+    scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=CONFIG["hyperparams"]["lr"]*5, 
+                                             steps_per_epoch=len(train_loader), epochs=CONFIG["hyperparams"]["epochs"])
     criterion = nn.CrossEntropyLoss(label_smoothing=CONFIG["hyperparams"]["label_smoothing"])
-    writer = SummaryWriter(CONFIG["paths"]["log_dir"] / f"phase_{PHASE}_{int(time.time())}")
 
-    # 5. Loop
-    best_acc, global_step = 0.0, 0
+    best_acc = 0.0
+
+    # 3. Training Loop
     for epoch in range(CONFIG["hyperparams"]["epochs"]):
-        train_loss, train_acc, global_step = train_one_epoch(model, train_loader, criterion, optimizer, scheduler, writer, epoch, global_step)
-        val_loss, val_acc = validate(model, val_loader, criterion)
+        model.train()
+        train_loss, train_correct, train_total = 0.0, 0, 0
         
-        print(f"Epoch {epoch+1} | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
-        
-        writer.add_scalar("Loss/val", val_loss, epoch)
-        writer.add_scalar("Accuracy/val", val_acc, epoch)
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}")
+        for images, labels in pbar:
+            images, labels = images.to(DEVICE), labels.to(DEVICE)
+            
+            # Mixup (Phase 2 only)
+            if PHASE == 2:
+                images, labels_a, labels_b, lam = mixup_data(images, labels)
+                outputs = model(images)
+                loss = mixup_criterion(criterion, outputs, labels_a, labels_b, lam)
+            else:
+                outputs = model(images)
+                loss = criterion(outputs, labels)
 
-        if val_acc > best_acc:
-            best_acc = val_acc
-            save_path = CONFIG["paths"]["checkpoint_dir"] / f"best_model_phase_{PHASE}.pth"
-            torch.save(model.state_dict(), save_path)
-            print(f">>> Saved Best Model: {val_acc:.2f}%")
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+
+            train_loss += loss.item()
+            _, predicted = torch.max(outputs, 1)
+            train_total += labels.size(0)
+            train_correct += (predicted == labels).sum().item() # Approx for mixup
+            
+            pbar.set_postfix(loss=train_loss/len(train_loader))
+
+        # Validation
+        model.eval()
+        val_loss, val_correct, val_total = 0.0, 0, 0
+        with torch.no_grad():
+            for images, labels in val_loader:
+                images, labels = images.to(DEVICE), labels.to(DEVICE)
+                outputs = model(images)
+                loss = criterion(outputs, labels)
+                val_loss += loss.item()
+                _, predicted = torch.max(outputs, 1)
+                val_total += labels.size(0)
+                val_correct += (predicted == labels).sum().item()
+
+        # --- Performance Summaries ---
+        epoch_train_loss = train_loss / len(train_loader)
+        epoch_val_loss = val_loss / len(val_loader)
+        epoch_train_acc = 100 * train_correct / train_total
+        epoch_val_acc = 100 * val_correct / val_total
+        current_lr = optimizer.param_groups[0]['lr']
+
+        # TensorBoard Logging
+        writer.add_scalar('Loss/Train', epoch_train_loss, epoch)
+        writer.add_scalar('Loss/Val', epoch_val_loss, epoch)
+        writer.add_scalar('Accuracy/Train', epoch_train_acc, epoch)
+        writer.add_scalar('Accuracy/Val', epoch_val_acc, epoch)
+        writer.add_scalar('LR', current_lr, epoch)
+
+        # CSV Logging
+        with open(csv_log_path, 'a', newline='') as f:
+            csv.writer(f).writerow([epoch, epoch_train_loss, epoch_train_acc, epoch_val_loss, epoch_val_acc, current_lr])
+
+        print(f"📊 Summary: Train Acc: {epoch_train_acc:.2f}% | Val Acc: {epoch_val_acc:.2f}% | LR: {current_lr:.6f}")
+
+        if epoch_val_acc > best_acc:
+            best_acc = epoch_val_acc
+            torch.save(model.state_dict(), CONFIG["paths"]["checkpoint_dir"] / f"best_model_phase_{PHASE}.pth")
+            print(f"🌟 Best model updated!")
 
     writer.close()
+    print(f"✅ Training complete. Logs saved to {CONFIG['paths']['log_dir']}")
 
 if __name__ == "__main__":
     main()
