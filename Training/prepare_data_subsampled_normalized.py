@@ -8,41 +8,33 @@ from tqdm import tqdm
 
 # --- CONFIGURATION ---
 DATA_ROOT = "/dev/shm/schoen/data"      # Input data (RAM)
-OUTPUT_DIR = "/dev/shm/schoen/output"   # Output CSVs + Stats (RAM) -> Prevents Disk Full Error
-STATS_SAMPLE_SIZE = 5000                # Number of files to use for calculating Mean/Std
+OUTPUT_DIR = "/dev/shm/schoen/output"   # Output CSVs + Stats (RAM)
+STATS_SAMPLE_SIZE = 5000                # (Wird hier nicht mehr gebraucht, stört aber nicht)
 # ---------------------
 
 def compute_statistics(file_list):
     """
-    Calculates the global mean and standard deviation of the dataset 
-    using a random sample of files.
+    (Veraltet/Optional) Berechnet Mean/Std selbst.
+    Wird unten nicht mehr aufgerufen, wenn wir AudioSet-Werte nutzen.
     """
     print(f"Computing Mean & Std based on a sample of {len(file_list)} files...")
-    
     pixel_sum = 0.0
     pixel_sq_sum = 0.0
     total_pixels = 0
     
-    # Use tqdm for progress bar
     for filepath in tqdm(file_list, desc="Calculating Stats"):
         try:
-            # Load .npy file
             mel = np.load(filepath)
-            
-            # Sum up pixels and squared pixels
             pixel_sum += np.sum(mel)
             pixel_sq_sum += np.sum(mel ** 2)
             total_pixels += mel.size
-            
         except Exception as e:
             print(f"Error loading {filepath}: {e}")
             continue
 
     if total_pixels == 0:
-        print("Warning: No pixels processed. Returning default stats.")
         return 0.0, 1.0
 
-    # Calculate final stats
     global_mean = pixel_sum / total_pixels
     global_var = (pixel_sq_sum / total_pixels) - (global_mean ** 2)
     global_std = np.sqrt(global_var)
@@ -88,9 +80,8 @@ def main():
         json.dump(class_to_idx, f, indent=4)
     print("Saved class_map.json")
 
-    # --- 3. Collect all .npy file paths from all subsets ---
+    # --- 3. Collect all .npy file paths ---
     data_list = []
-
     print("Scanning subset folders for .npy files...")
     for subset in subset_dirs:
         for cls_name in bird_classes:
@@ -109,11 +100,10 @@ def main():
     print(f"Total collected .npy files: {len(df)}")
     
     if len(df) == 0:
-        print("ABORTING: No .npy files found. Please check paths!")
+        print("ABORTING: No .npy files found.")
         return
 
     # --- 4. Train/Validation split ---
-    # Stratified split ensures every bird class is represented in validation
     train_df, val_df = train_test_split(
         df,
         test_size=0.1,
@@ -122,25 +112,27 @@ def main():
         shuffle=True
     )
 
-    # --- 5. NEW: Calculate Normalization Stats ---
-    # We use only training data to prevent data leakage!
-    if len(train_df) > STATS_SAMPLE_SIZE:
-        sample_files = train_df['filepath'].sample(STATS_SAMPLE_SIZE, random_state=42).tolist()
-    else:
-        sample_files = train_df['filepath'].tolist()
-
-    mean, std = compute_statistics(sample_files)
-    
+    # --- 5. STATS SETUP (GEÄNDERT) ---
     print("-" * 30)
-    print(f"Calculated Dataset Mean: {mean:.4f}")
-    print(f"Calculated Dataset Std:  {std:.4f}")
+    print("Using OFFICIAL AudioSet Statistics (PaSST Defaults)")
+    
+    # Anstatt zu berechnen, setzen wir die Werte hart:
+    mean = -4.2677393
+    std = 4.5689974
+    
+    # HINWEIS: Falls du doch wieder selbst berechnen willst, 
+    # kommentiere die 2 Zeilen oben aus und nimm das hier wieder rein:
+    # mean, std = compute_statistics(train_df['filepath'].sample(min(len(train_df), STATS_SAMPLE_SIZE)).tolist())
+
+    print(f"Set Dataset Mean: {mean:.4f}")
+    print(f"Set Dataset Std:  {std:.4f}")
     print("-" * 30)
 
     # Save stats to JSON so train.py can read them
     stats = {"mean": mean, "std": std}
     with open(os.path.join(OUTPUT_DIR, "normalization_stats.json"), "w") as f:
         json.dump(stats, f, indent=4)
-    print("Saved normalization_stats.json")
+    print("Saved normalization_stats.json with AudioSet values.")
 
     # --- 6. Save CSVs ---
     train_df.to_csv(os.path.join(OUTPUT_DIR, "train.csv"), index=False)
@@ -148,7 +140,6 @@ def main():
 
     print(f"Created train.csv ({len(train_df)} samples)")
     print(f"Created val.csv ({len(val_df)} samples)")
-    print(f"Files saved to: {OUTPUT_DIR}")
     print("DONE!")
 
 if __name__ == "__main__":

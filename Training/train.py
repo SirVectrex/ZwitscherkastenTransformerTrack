@@ -21,7 +21,7 @@ from dataset import MelDataset
 # --- CONFIGURATION ---
 CSV_TRAIN = "./Training/train.csv"  # columns: filepath, label
 CSV_VAL = "./Training/val.csv"
-NUM_CLASSES = 64         # Change this to your number of bird species
+NUM_CLASSES = 59         # Change this to your number of bird species
 BATCH_SIZE = 16          # PaSST is heavy; reduce this if you get CUDA OOM
 LEARNING_RATE = 1e-3     # Initial Value (will be overwritten if Phase 2)
 EPOCHS = 20
@@ -39,9 +39,9 @@ LOAD_CHECKPOINT = None  # Default init
 
 # --- CONFIG PHASE 2 ---
 if PHASE == 2:
-    LOAD_CHECKPOINT = "/dev/shm/schoen/checkpoints/Bestmodell_phase1.pth" 
-    LEARNING_RATE = 5e-6    
-    EPOCHS = 30             
+    #LOAD_CHECKPOINT = "/dev/shm/schoen/checkpoints/Bestmodell_phase1.pth" 
+    LEARNING_RATE = 1e-5    
+    EPOCHS = 20             
 
 def get_passt_model(num_classes: int):
     print("Loading PaSST model...")
