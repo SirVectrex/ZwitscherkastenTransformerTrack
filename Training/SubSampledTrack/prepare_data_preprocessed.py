@@ -8,7 +8,7 @@ from sklearn.model_selection import train_test_split
 # --- CONFIGURATION ---
 # We go 2 levels up (../../) from "Training/SubSampledTrack" to find "DataProcessing"
 CURRENT_DIR = Path(__file__).parent.resolve()
-DATA_ROOT = CURRENT_DIR / "../../DataProcessing/split_dataset_1000_preprocessed"
+DATA_ROOT = Path("/dev/shm/schoen/data_unzipped/split_dataset_1000_preprocessed")
 
 # Save CSVs and Json stats in the SAME folder as this script
 OUTPUT_DIR = CURRENT_DIR 

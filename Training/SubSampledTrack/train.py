@@ -24,7 +24,7 @@ except ImportError:
 from dataset import MelDataset
 
 # --- GLOBAL CONFIGURATION ---
-CURRENT_DIR = Path(__file__).parent.resolve()
+CURRENT_DIR = Path("")
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Set your current phase here
