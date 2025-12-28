@@ -21,7 +21,7 @@ MIN_SAMPLES_PER_CLASS = 500
 # ---------------------
 
 
-def stratified_oversample(df, min_samples_per_class=500):
+def stratified_oversample(df, idx_to_class, min_samples_per_class=500):
     """
     Oversample rare classes to at least min_samples_per_class.
     Common classes stay as-is to avoid introducing redundancy.
@@ -34,7 +34,7 @@ def stratified_oversample(df, min_samples_per_class=500):
     
     for class_label in sorted(df['label'].unique()):
         class_df = df[df['label'] == class_label].reset_index(drop=True)
-        class_name = class_df.iloc[0]['bird_name']
+        class_name = idx_to_class[str(int(class_label))]
         current_count = len(class_df)
         
         if current_count < min_samples_per_class:
@@ -95,7 +95,7 @@ def main():
         json.dump(class_to_idx, f, indent=4)
     
     # Reverse mapping for later reference
-    idx_to_class = {v: k for k, v in class_to_idx.items()}
+    idx_to_class = {str(v): k for k, v in class_to_idx.items()}
     with open(OUTPUT_DIR / "idx_to_class.json", "w") as f:
         json.dump(idx_to_class, f, indent=4)
 
@@ -122,7 +122,7 @@ def main():
         return
 
     # --- 3. OVERSAMPLE MINORITY CLASSES ---
-    df = stratified_oversample(df, min_samples_per_class=MIN_SAMPLES_PER_CLASS)
+    df = stratified_oversample(df, idx_to_class, min_samples_per_class=MIN_SAMPLES_PER_CLASS)
 
     # --- 4. SPLIT INTO TRAIN/VAL ---
     train_df, val_df = train_test_split(
@@ -138,15 +138,15 @@ def main():
     num_classes = len(class_counts)
     class_weights = num_classes / (class_counts.values * len(class_counts))
     
-    class_weight_dict = {int(idx): float(weight) for idx, weight in enumerate(class_weights)}
+    class_weight_dict = {str(int(idx)): float(weight) for idx, weight in enumerate(class_weights)}
     
     with open(OUTPUT_DIR / "class_weights.json", "w") as f:
         json.dump(class_weight_dict, f, indent=4)
     
     print("\n📈 Class weights (for loss function):")
-    for idx in sorted(class_weight_dict.keys()):
+    for idx in sorted([int(k) for k in class_weight_dict.keys()]):
         bird_name = idx_to_class[str(idx)]
-        print(f"  {bird_name}: {class_weight_dict[idx]:.4f}")
+        print(f"  {bird_name}: {class_weight_dict[str(idx)]:.4f}")
 
     # --- 6. SAVE PASST STATISTICS ---
     passt_stats = {
