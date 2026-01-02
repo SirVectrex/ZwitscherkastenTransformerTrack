@@ -2,7 +2,7 @@
 Train MobileNet v3 for Bird Audio Classification
 
 Uses existing preprocessed .npy files from prepare_data_from_raw_audio.py
-No new preprocessing needed! ✅
+
 """
 
 import torch
@@ -30,7 +30,7 @@ CONFIG = {
         "train_csv": "train.csv",
         "val_csv": "val.csv",
         "preprocessed_mels_dir": "preprocessed_mels",
-        "class_weights_file": "class_weights.json",
+        "class_weights_file": "class_weights_mobilenet.json",
     },
     
     "training": {
