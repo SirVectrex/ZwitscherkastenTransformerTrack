@@ -233,10 +233,9 @@ def main():
     scheduler = optim.lr_scheduler.OneCycleLR(
         optimizer, 
         max_lr=CONFIG["hyperparams"]["lr"] * 5, 
-        batch_size=CONFIG["hyperparams"]["batch_size"],  # 64
-        steps_per_epoch=len(train_loader),              # full steps
-        epochs=CONFIG["hyperparams"]["epochs"]
-    )
+        total_steps=len(train_loader) * CONFIG["hyperparams"]["epochs"],
+)
+
 
     # Load class weights if available
     class_weights = None
