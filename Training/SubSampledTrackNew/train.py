@@ -47,7 +47,7 @@ CONFIG = {
         "load_checkpoint": CURRENT_DIR / "checkpoints" / "best_model_phase_1.pth" 
     },
     "hyperparams": {
-        "batch_size": 64,
+        "batch_size": 32,
         "epochs": 30 if PHASE == 2 else 20,
         "lr": 1e-5 if PHASE == 2 else 1e-4,
         "weight_decay": 0.0001,

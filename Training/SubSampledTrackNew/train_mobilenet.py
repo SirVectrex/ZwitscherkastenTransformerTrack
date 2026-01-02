@@ -34,7 +34,7 @@ CONFIG = {
     },
     
     "training": {
-        "batch_size": 64,  # Larger batch for MobileNet (smaller model)
+        "batch_size": 32,  # Larger batch for MobileNet (smaller model)
         "epochs": 20,
         "learning_rate": 1e-3,  # Higher LR for training from scratch
         "weight_decay": 1e-5,
