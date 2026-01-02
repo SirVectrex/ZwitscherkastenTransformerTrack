@@ -21,6 +21,8 @@ metadata/
 mel_spectrograms_uint8/
 split_dataset_undersampled/
 split_dataset_oversampling
+Training/SubSampledTrackNew/preprocessed_mels/
+
 
 # IDE Einstellungen (optional)
 .vscode/
